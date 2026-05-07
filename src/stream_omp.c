@@ -44,9 +44,6 @@
 # include <stdint.h>
 # include <omp.h>
 
-#define DEBUG_LOG_PATH "/home/gem5/mess_omp2/debug-2ac992.log"
-#define DEBUG_SESSION_ID "2ac992"
-
 static long long debug_now_ms(void)
 {
     struct timeval tv;
@@ -54,22 +51,9 @@ static long long debug_now_ms(void)
     return ((long long)tv.tv_sec * 1000LL) + ((long long)tv.tv_usec / 1000LL);
 }
 
-static void debug_log_json(const char *run_id,
-                           const char *hypothesis_id,
-                           const char *location,
-                           const char *message,
-                           const char *data_json)
+static void debug_log_json(const char *message)
 {
-    fprintf(stdout,
-            "{\"sessionId\":\"%s\",\"runId\":\"%s\",\"hypothesisId\":\"%s\","
-            "\"location\":\"%s\",\"message\":\"%s\",\"data\":%s,\"timestamp\":%lld}\n",
-            DEBUG_SESSION_ID,
-            run_id,
-            hypothesis_id,
-            location,
-            message,
-            data_json,
-            debug_now_ms());
+    fprintf(stdout, "{\"message\":\"%s\",\"timestamp\":%lld}\n", message, debug_now_ms());
     fflush(stdout);
 }
 
@@ -107,63 +91,6 @@ void m5_dump_stats(uint64_t delay, uint64_t period) {
 
 # include "utils.h"
 
-/*-----------------------------------------------------------------------
- * The benchmark is based on the modified STREAM benchmark
- * (original STREAM benchmark: http://www.cs.virginia.edu/stream/).
- * Contrary to the original STREAM benchmark, it contains only the Copy kernel
- * while the specific kernel functions for different RD ratios are coded
- * in x86 assembly, using AVX instructions and non-temporal stores
- * (defined in utils.c file).
- * Also, the content of the arrays at the end is not checked.
- * We kept most of the comments from the original STREAM code.
- *
- * INSTRUCTIONS:
- *
- *	1) Benchmark requires different amounts of memory to run on different
- *     systems, depending on both the system cache size(s) and the
- *     granularity of the system timer.
- *     You should adjust the value of 'STREAM_ARRAY_SIZE' (below)
- *     to meet *both* of the following criteria:
- *       (a) Each array must be at least 4 times the size of the
- *           available cache memory. In practice, the minimum array size
- *           is about 3.8 times the cache size.
- *           Example 1: One Xeon E3 with 8 MB L3 cache
- *               STREAM_ARRAY_SIZE should be >= 4 million, giving
- *               an array size of 30.5 MB and a total memory requirement
- *               of 91.5 MB.
- *           Example 2: Two Xeon E5's with 20 MB L3 cache each (using OpenMP)
- *               STREAM_ARRAY_SIZE should be >= 20 million, giving
- *               an array size of 153 MB and a total memory requirement
- *               of 458 MB.
- *       (b) The size should be large enough so that the 'timing calibration'
- *           output by the program is at least 20 clock-ticks.
- *           Example: most versions of Windows have a 10 millisecond timer
- *               granularity.  20 "ticks" at 10 ms/tic is 200 milliseconds.
- *               If the chip is capable of 10 GB/s, it moves 2 GB in 200 msec.
- *               This means the each array must be at least 1 GB, or 128M elements.
- *
- *      Version 5.10 increases the default array size from 2 million
- *          elements to 10 million elements in response to the increasing
- *          size of L3 caches.  The new default size is large enough for caches
- *          up to 20 MB.
- *      Version 5.10 changes the loop index variables from "register int"
- *          to "ssize_t", which allows array indices >2^32 (4 billion)
- *          on properly configured 64-bit systems.  Additional compiler options
- *          (such as "-mcmodel=medium") may be required for large memory runs.
- *
- *      Array size can be set at compile time without modifying the source
- *          code for the (many) compilers that support preprocessor definitions
- *          on the compile line.  E.g.,
- *                icc -O -DSTREAM_ARRAY_SIZE=100000000 stream_mpi.c -o stream_mpi.100M
- *          will override the default size of 80M with a new size of 100M elements
- *          per array.
- */
-
-/*
-#ifndef STREAM_ARRAY_SIZE
-#   define STREAM_ARRAY_SIZE	400000000
-#endif
-*/
 
 #ifdef NTIMES
 #if NTIMES <= 0
@@ -190,119 +117,142 @@ void m5_dump_stats(uint64_t delay, uint64_t period) {
 
 #define STREAM_KERNEL_GRAIN_ELEMS 400
 
-// Some compilers require an extra keyword to recognize the "restrict" qualifier.
 double * __restrict a, * __restrict b;
 ssize_t array_elements, array_bytes, array_alignment;
 
-const char *usage = "[-r <read_ratio>] [-p <pause>] [-s <array_size>] [-n <iterations>] [-P <period_ticks>] [-i] [-e] [-I] [-E]\n";
+const char *usage = "[-r <read_ratio>] [-p <pause>] [-s <array_size>] [-n <iterations>] [-P <period_ticks>] [-i] [-e] [-h|--help]\n";
 
 void (*STREAM_copy_rw)(double *a_array, double *b_array,
                          ssize_t *array_size, const int* const pause) = NULL;
 
-int main(int argc, char *argv[])
-{
-    
-    long long STREAM_ARRAY_SIZE = 0;	
-    int BytesPerWord, k, rd_percentage = 50, opt;
-    ssize_t j;
-    int pause = 0;
-    int run_iterations = NTIMES;
-    long long periodic_stats_ticks = 0;
-    int cli_skip_init = 0;
-    int cli_skip_pre_m5_exit = 0;
-    int cli_force_init = 0;
-    int cli_force_pre_m5_exit = 0;
+typedef struct {
+    long long stream_array_size;
+    int       rd_percentage;
+    int       pause_value;
+    int       run_iterations;
+    long long periodic_stats_ticks;
+    int       cli_skip_init;
+    int       cli_skip_pre_m5_exit;
+    int       cli_force_pre_m5_exit;
+    int       debug_enabled;
+} cli_options;
 
-    // Command line parsing
-    while (( opt = getopt(argc, argv, ":r:p:s:n:P:IEie")) != -1)
+static void parse_args(int argc, char *argv[], cli_options *opts)
+{
+    int opt;
+    while ((opt = getopt(argc, argv, ":r:p:s:n:P:iedh")) != -1)
     {
-        switch(opt)
+        switch (opt)
         {
             case 'r':
-                rd_percentage = atoi(optarg);
-                if (rd_percentage < 0 || rd_percentage > 100 || rd_percentage % 2 == 1)
+                opts->rd_percentage = atoi(optarg);
+                if (opts->rd_percentage < 0 || opts->rd_percentage > 100)
                 {
                     printf("ERROR: RD ratio has to be even number between 50 and 100.\n");
                     exit(-1);
                 }
                 break;
             case 'p':
-                pause = atoi(optarg);
-                if (pause < 0)
+                opts->pause_value = atoi(optarg);
+                if (opts->pause_value < 0)
                 {
                     printf("ERROR: Pause has to be a non-negative number.\n");
                     exit(-1);
                 }
                 break;
             case 's':
-                STREAM_ARRAY_SIZE = atoll(optarg);
+                opts->stream_array_size = atoll(optarg);
+                if (opts->stream_array_size <= 0)
+                {
+                    printf("ERROR: Array size must be > 0. Please specify -s <size>\n");
+                    exit(-1);
+                }
                 break;
             case 'n':
-                run_iterations = atoi(optarg);
-                if (run_iterations <= 0)
+                opts->run_iterations = atoi(optarg);
+                if (opts->run_iterations <= 0)
                 {
                     printf("ERROR: Iterations must be a positive integer.\n");
                     exit(-1);
                 }
                 break;
             case 'P':
-                periodic_stats_ticks = atoll(optarg);
-                if (periodic_stats_ticks < 0)
+                opts->periodic_stats_ticks = atoll(optarg);
+                if (opts->periodic_stats_ticks < 0)
                 {
                     printf("ERROR: periodic stats ticks must be >= 0.\n");
                     exit(-1);
                 }
                 break;
-            case 'I':
-                cli_force_init = 1;
-                break;
             case 'i':
-                cli_skip_init = 1;
-                break;
-            case 'E':
-                cli_force_pre_m5_exit = 1;
+                opts->cli_skip_init = 1;
                 break;
             case 'e':
-                cli_skip_pre_m5_exit = 1;
+                opts->cli_skip_pre_m5_exit = 1;
                 break;
-	    default:
+            case 'd':
+                opts->debug_enabled = 1;
+                break;
+            case 'h':
+                printf("Usage: %s %s", argv[0], usage);
+                printf("Options:\n");
+                printf("  -r <read_ratio>         Set the read ratio (even number between 50 and 100)\n");
+                printf("  -p <pause>              Set pause duration (non-negative integer)\n");
+                printf("  -s <array_size>         Set array size (positive integer)\n");
+                printf("  -n <iterations>         Set number of kernel iterations (positive integer)\n");
+                printf("  -P <period_ticks>       Set periodic statistics ticks interval (>= 0) waited to dump stats \n");
+                printf("  -i                      Skip stream array initialization\n");
+                printf("  -d                      Enable debug logging\n");
+                printf("  -h                      Show this help message\n");
+                exit(0);
+            default:
                 print_usage(argv, (char *)usage);
                 exit(-1);
         }
     }
+}
 
-    if (optind < argc || STREAM_ARRAY_SIZE == 0)
-    {
-        if (STREAM_ARRAY_SIZE == 0) printf("ERROR: array size must be > 0. Please specify -s <size>\n");
-        print_usage(argv, (char *)usage);
-        exit(-1);
-    }
-    {
-        char data_json[256];
-        snprintf(data_json, sizeof(data_json),
-                 "{\"streamArraySize\":%lld,\"rdPercentage\":%d,\"pause\":%d,"
-                 "\"optind\":%d,\"argc\":%d,\"cliSkipInit\":%d,\"cliSkipPreM5Exit\":%d,"
-                 "\"cliForceInit\":%d,\"cliForcePreM5Exit\":%d,\"runIterations\":%d,"
-                 "\"periodicStatsTicks\":%lld}",
-                 STREAM_ARRAY_SIZE,
-                 rd_percentage,
-                 pause,
-                 optind,
-                 argc,
-                 cli_skip_init,
-                 cli_skip_pre_m5_exit,
-                 cli_force_init,
-                 cli_force_pre_m5_exit,
-                 run_iterations,
-                 periodic_stats_ticks);
-        // #region agent log
-        debug_log_json("pre-fix", "H1", "stream_omp.c:main:post-parse",
-                       "Parsed CLI arguments", data_json);
-        // #endregion
-    }
+int main(int argc, char *argv[])
+{
+    
+    int BytesPerWord, k;
+    ssize_t j;
 
-    // End of command line partsing
+    cli_options opts = {
+        .stream_array_size      = 0,
+        .rd_percentage          = 50,
+        .pause_value            = 0,
+        .run_iterations         = NTIMES,
+        .periodic_stats_ticks   = 0,
+        .cli_skip_init          = 0,
+        .cli_skip_pre_m5_exit   = 0,
+        .cli_force_pre_m5_exit  = 0,
+        .debug_enabled          = 0,
+    };
+    parse_args(argc, argv, &opts);
 
+    long long STREAM_ARRAY_SIZE     = opts.stream_array_size;
+    int       rd_percentage         = opts.rd_percentage;
+    int       pause                 = opts.pause_value;
+    int       run_iterations        = opts.run_iterations;
+    long long periodic_stats_ticks  = opts.periodic_stats_ticks;
+    int       cli_skip_init         = opts.cli_skip_init;
+    int       cli_skip_pre_m5_exit  = opts.cli_skip_pre_m5_exit;
+    int       cli_force_pre_m5_exit = opts.cli_force_pre_m5_exit;
+    int       debug_enabled         = opts.debug_enabled;
+
+    if (debug_enabled)
+        {
+            char dbg_msg[512];
+            snprintf(dbg_msg, sizeof(dbg_msg),
+                "Finished parsing command line arguments: rd_percentage=%d, pause=%d, array_size=%lld, iterations=%d, periodic_stats_ticks=%lld, skip_init=%d, skip_pre_m5_exit=%d, force_pre_m5_exit=%d, debug_enabled=%d",
+                rd_percentage, pause, STREAM_ARRAY_SIZE, run_iterations,
+                periodic_stats_ticks, cli_skip_init, cli_skip_pre_m5_exit,
+                cli_force_pre_m5_exit, debug_enabled);
+            debug_log_json(dbg_msg);
+        }
+   
+    
     // Assigning the right asm function based on the RD ratio
     switch(rd_percentage)
     {
@@ -463,17 +413,9 @@ int main(int argc, char *argv[])
             STREAM_copy_rw = &STREAM_copy_50;
             break;
     }
-    {
-        char data_json[160];
-        snprintf(data_json, sizeof(data_json),
-                 "{\"rdPercentage\":%d,\"kernelPtr\":%llu}",
-                 rd_percentage,
-                 (unsigned long long)(uintptr_t)STREAM_copy_rw);
-        // #region agent log
-        debug_log_json("pre-fix", "H3", "stream_omp.c:main:kernel-select",
-                       "Selected kernel function", data_json);
-        // #endregion
-    }
+    
+    if (debug_enabled)
+        debug_log_json("Selected STREAM kernel function");
 
 
     /* --- distribute requested storage across MPI ranks --- */
@@ -552,35 +494,9 @@ int main(int argc, char *argv[])
 
     /* --- SETUP --- initialize arrays --- */
     {
-        int skip_init = 1;
-        if (cli_force_init)
-            skip_init = 0;
-        if (cli_skip_init)
-            skip_init = 1;
-        if (skip_init && rd_percentage >= 98)
-        {
-            /* H16 confirmed: skipping init with very high read ratios keeps
-             * traffic off DRAM (zero-page effects). Force full init to reach
-             * the expected high-bandwidth behavior for read-heavy kernels.
-             */
-            skip_init = 0;
-            // #region agent log
-            debug_log_json("pre-fix", "H16", "stream_omp.c:setup:auto-force-init",
-                           "Overrode skip init for high read ratio",
-                           "{\"reason\":\"high_read_ratio\",\"threshold\":98}");
-            // #endregion
-        }
-        {
-            char data_json[128];
-            snprintf(data_json, sizeof(data_json),
-                     "{\"skipInit\":%d,\"arrayElements\":%lld}",
-                     skip_init, (long long)array_elements);
-            // #region agent log
-            debug_log_json("pre-fix", "H9", "stream_omp.c:setup:init-start",
-                           "About to initialize arrays", data_json);
-            // #endregion
-        }
-        if (!skip_init)
+        if (debug_enabled)
+            debug_log_json("Starting array initialization setup");
+        if (!cli_skip_init)
         {
 #ifdef _OPENMP
             #pragma omp parallel for
@@ -591,55 +507,16 @@ int main(int argc, char *argv[])
                 b[j] = 2.0;
             }
         }
-        {
-            // #region agent log
-            debug_log_json("pre-fix", "H9", "stream_omp.c:setup:init-end",
-                           "Finished array initialization", "{\"ok\":1}");
-            // #endregion
-        }
+        if (debug_enabled)
+            debug_log_json("Finished array initialization setup");
     }
 
     /*	--- MAIN LOOP --- repeat the kernel like STREAM --- */
+    if (debug_enabled)
+        debug_log_json("Entering ROI parallel section");
     
-    {
-        // #region agent log
-        debug_log_json("pre-fix", "H6", "stream_omp.c:main:roi-enter",
-                       "Entering ROI parallel section",
-                       "{\"note\":\"before parallel region\"}");
-        // #endregion
-    }
-    {
-        int skip_pre_roi_exit = 1;
-        if (cli_force_pre_m5_exit)
-            skip_pre_roi_exit = 0;
-        if (cli_skip_pre_m5_exit)
-            skip_pre_roi_exit = 1;
-        {
-            char data_json[96];
-            snprintf(data_json, sizeof(data_json),
-                     "{\"skipPreM5Exit\":%d}", skip_pre_roi_exit);
-            // #region agent log
-            debug_log_json("pre-fix", "H8", "stream_omp.c:main:pre-m5-exit",
-                           "About to execute pre-ROI m5_exit", data_json);
-            // #endregion
-        }
-        if (!skip_pre_roi_exit)
-        {
-            // Trigger Python to switch from ATOMIC CPU to O3 CPU precisely before the ROI
-            m5_exit(0);
-            // #region agent log
-            debug_log_json("pre-fix", "H8", "stream_omp.c:main:post-m5-exit",
-                           "Returned from pre-ROI m5_exit", "{\"returned\":1}");
-            // #endregion
-        }
-        else
-        {
-            // #region agent log
-            debug_log_json("pre-fix", "H8", "stream_omp.c:main:post-m5-exit",
-                           "Skipped pre-ROI m5_exit by env", "{\"returned\":0}");
-            // #endregion
-        }
-    }
+    // Trigger Python to switch from ATOMIC CPU to O3 CPU precisely before the ROI
+    m5_exit(0);
 
 #ifdef _OPENMP
         #pragma omp parallel
@@ -666,47 +543,21 @@ int main(int argc, char *argv[])
         local_start = ((thread_id * chunk) + MIN(thread_id, remainder)) *
                       STREAM_KERNEL_GRAIN_ELEMS;
         local_elements = local_blocks * STREAM_KERNEL_GRAIN_ELEMS;
-        if (thread_id < 4)
-        {
-            char data_json[320];
-            snprintf(data_json, sizeof(data_json),
-                     "{\"threadId\":%d,\"threadCount\":%d,\"totalBlocks\":%lld,"
-                     "\"chunk\":%lld,\"remainder\":%lld,\"localBlocks\":%lld,"
-                     "\"localStart\":%lld,\"localElements\":%lld,\"arrayElements\":%lld}",
-                     thread_id,
-                     thread_count,
-                     (long long)total_blocks,
-                     (long long)chunk,
-                     (long long)remainder,
-                     (long long)local_blocks,
-                     (long long)local_start,
-                     (long long)local_elements,
-                     (long long)array_elements);
-            // #region agent log
-            debug_log_json("pre-fix", "H2", "stream_omp.c:parallel:partition",
-                           "Computed thread partition", data_json);
-            // #endregion
-        }
+        if (debug_enabled && thread_id < 4)
+            debug_log_json("Computed thread partition for STREAM kernel");
 
 #ifdef _OPENMP
         #pragma omp barrier
         #pragma omp master
 #endif
         {
-            // #region agent log
-            debug_log_json("pre-fix", "H6", "stream_omp.c:parallel:reset",
-                           "Issuing m5_dump_reset_stats", "{\"ok\":1}");
-            // #endregion
+            if (debug_enabled)
+                debug_log_json("Resetting gem5 statistics before timed region");
             m5_dump_reset_stats(0, 0);
             if (periodic_stats_ticks > 0)
             {
-                char data_json[128];
-                snprintf(data_json, sizeof(data_json),
-                         "{\"periodTicks\":%lld}", periodic_stats_ticks);
-                // #region agent log
-                debug_log_json("pre-fix", "H18", "stream_omp.c:parallel:periodic-stats",
-                               "Enabled periodic m5_dump_stats", data_json);
-                // #endregion
+                if (debug_enabled)
+                    debug_log_json("Enabling periodic gem5 statistics dumps");
                 m5_dump_stats(0, (uint64_t)periodic_stats_ticks);
             }
         }
@@ -718,80 +569,36 @@ int main(int argc, char *argv[])
         {
             if (thread_id == 0)
             {
-                char data_json[96];
-                snprintf(data_json, sizeof(data_json),
-                         "{\"iter\":%d,\"runIterations\":%d}", iter, run_iterations);
-                // #region agent log
-                debug_log_json("pre-fix", "H11", "stream_omp.c:parallel:iter-start",
-                               "Starting kernel iteration", data_json);
-                // #endregion
+                if (debug_enabled)
+                    debug_log_json("Starting STREAM kernel iteration");
             }
             if (local_elements > 0)
             {
                 if (iter == 0 && thread_id == 0)
                 {
-                    // #region agent log
-                    debug_log_json("pre-fix", "H7", "stream_omp.c:parallel:before-kernel",
-                                   "About to call STREAM_copy_rw", "{\"threadId\":0,\"iter\":0}");
-                    // #endregion
+                    if (debug_enabled)
+                        debug_log_json("Calling STREAM kernel function for the first time");
                 }
-                long long t_start = debug_now_ms();
                 STREAM_copy_rw(a + local_start, b + local_start, &local_elements, &pause);
-                if (iter == 0 && thread_id < 2)
-                {
-                    long long t_end = debug_now_ms();
-                    char data_json[256];
-                    snprintf(data_json, sizeof(data_json),
-                             "{\"threadId\":%d,\"iter\":%d,\"localElements\":%lld,"
-                             "\"elapsedMs\":%lld,\"pause\":%d}",
-                             thread_id,
-                             iter,
-                             (long long)local_elements,
-                             (long long)(t_end - t_start),
-                             pause);
-                    // #region agent log
-                    debug_log_json("pre-fix", "H4", "stream_omp.c:parallel:kernel-call",
-                                   "Kernel call timing sample", data_json);
-                    // #endregion
-                }
+                if (debug_enabled && iter == 0 && thread_id < 2)
+                    debug_log_json("Finished first STREAM kernel call sample");
             }
             if (thread_id == 0)
             {
-                char data_json[96];
-                snprintf(data_json, sizeof(data_json),
-                         "{\"iter\":%d,\"runIterations\":%d}", iter, run_iterations);
-                // #region agent log
-                debug_log_json("pre-fix", "H11", "stream_omp.c:parallel:iter-end",
-                               "Finished kernel iteration", data_json);
-                // #endregion
+                if (debug_enabled)
+                    debug_log_json("Finished STREAM kernel iteration");
             }
         }
 
 #ifdef _OPENMP
-        if (thread_id < 4)
-        {
-            char data_json[160];
-            snprintf(data_json, sizeof(data_json),
-                     "{\"threadId\":%d,\"localElements\":%lld,\"runIterations\":%d}",
-                     thread_id, (long long)local_elements, run_iterations);
-            // #region agent log
-            debug_log_json("pre-fix", "H14", "stream_omp.c:parallel:before-final-barrier",
-                           "Thread reached final barrier point", data_json);
-            // #endregion
-        }
+        if (debug_enabled && thread_id < 4)
+            debug_log_json("Thread reached final ROI barrier");
         #pragma omp barrier
         #pragma omp master
 #endif
         {
-            char data_json[160];
-            snprintf(data_json, sizeof(data_json),
-                     "{\"ntimes\":%d,\"arrayElements\":%lld}",
-                     run_iterations,
-                     (long long)array_elements);
-            // #region agent log
-            debug_log_json("pre-fix", "H5", "stream_omp.c:parallel:roi-end",
-                           "Reached ROI end before dump_stats", data_json);
-            // #endregion
+            if (debug_enabled)
+                debug_log_json("Leaving ROI and dumping final gem5 statistics");
             m5_dump_stats(0, 0);
             // End the simulation immediately after the timed region completes.
             m5_exit(0);
