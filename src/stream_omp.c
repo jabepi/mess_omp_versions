@@ -1,37 +1,5 @@
-/*
- * Copyright (c) 2024, Barcelona Supercomputing Center
- * Contact: mess             [at] bsc [dot] es
- *          pouya.esmaili    [at] bsc [dot] es
- *          petar.radojkovic [at] bsc [dot] es
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *     * Redistributions of source code must retain the above copyright notice,
- *       this list of conditions and the following disclaimer.
- *
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in the
- *       documentation and/or other materials provided with the distribution.
- *
- *     * Neither the name of the copyright holder nor the names
- *       of its contributors may be used to endorse or promote products
- *       derived from this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
-
 # define _XOPEN_SOURCE 600
+# define STREAM_ARRAY_ALIGNMENT 64 // cache-line alignment
 
 # include <stdio.h>
 # include <stdlib.h>
@@ -43,6 +11,7 @@
 # include <sys/time.h>
 # include <stdint.h>
 # include <omp.h>
+# include "utils.h"
 
 static long long debug_now_ms(void)
 {
@@ -50,13 +19,13 @@ static long long debug_now_ms(void)
     gettimeofday(&tv, NULL);
     return ((long long)tv.tv_sec * 1000LL) + ((long long)tv.tv_usec / 1000LL);
 }
-
 static void debug_log_json(const char *message)
 {
     fprintf(stdout, "{\"message\":\"%s\",\"timestamp\":%lld}\n", message, debug_now_ms());
     fflush(stdout);
 }
 
+// Gem5 functions 
 void m5_dump_reset_stats(uint64_t delay, uint64_t period) {
 #if defined(__aarch64__)
     register uint64_t x0 __asm__("x0") = delay;
@@ -67,7 +36,6 @@ void m5_dump_reset_stats(uint64_t delay, uint64_t period) {
     );
 #endif
 }
-
 void m5_exit(uint64_t delay) {
 #if defined(__aarch64__)
     register uint64_t x0 __asm__("x0") = delay;
@@ -77,7 +45,6 @@ void m5_exit(uint64_t delay) {
     );
 #endif
 }
-
 void m5_dump_stats(uint64_t delay, uint64_t period) {
 #if defined(__aarch64__)
     register uint64_t x0 __asm__("x0") = delay;
@@ -89,18 +56,6 @@ void m5_dump_stats(uint64_t delay, uint64_t period) {
 #endif
 }
 
-# include "utils.h"
-
-
-#ifdef NTIMES
-#if NTIMES <= 0
-#undef NTIMES
-#define NTIMES 10
-#endif
-#endif
-#ifndef NTIMES
-#define NTIMES 10
-#endif
 
 # define HLINE "-------------------------------------------------------------\n"
 
@@ -120,7 +75,7 @@ void m5_dump_stats(uint64_t delay, uint64_t period) {
 double * __restrict a, * __restrict b;
 ssize_t array_elements, array_bytes, array_alignment;
 
-const char *usage = "[-r <read_ratio>] [-p <pause>] [-s <array_size>] [-n <iterations>] [-P <period_ticks>] [-i] [-e] [-h|--help]\n";
+const char *usage = "[-r <read_ratio>] [-p <pause>] [-s <array_size>] [-n <iterations>] [-P <period_ticks>] [-i] [-h]\n";
 
 void (*STREAM_copy_rw)(double *a_array, double *b_array,
                          ssize_t *array_size, const int* const pause) = NULL;
@@ -132,15 +87,13 @@ typedef struct {
     int       run_iterations;
     long long periodic_stats_ticks;
     int       cli_skip_init;
-    int       cli_skip_pre_m5_exit;
-    int       cli_force_pre_m5_exit;
     int       debug_enabled;
 } cli_options;
 
 static void parse_args(int argc, char *argv[], cli_options *opts)
 {
     int opt;
-    while ((opt = getopt(argc, argv, ":r:p:s:n:P:iedh")) != -1)
+    while ((opt = getopt(argc, argv, ":r:p:s:n:P:idh")) != -1)
     {
         switch (opt)
         {
@@ -187,16 +140,13 @@ static void parse_args(int argc, char *argv[], cli_options *opts)
             case 'i':
                 opts->cli_skip_init = 1;
                 break;
-            case 'e':
-                opts->cli_skip_pre_m5_exit = 1;
-                break;
             case 'd':
                 opts->debug_enabled = 1;
                 break;
             case 'h':
                 printf("Usage: %s %s", argv[0], usage);
                 printf("Options:\n");
-                printf("  -r <read_ratio>         Set the read ratio (even number between 50 and 100)\n");
+                printf("  -r <read_ratio>         Set the read ratio (number between 0 and 100)\n");
                 printf("  -p <pause>              Set pause duration (non-negative integer)\n");
                 printf("  -s <array_size>         Set array size (positive integer)\n");
                 printf("  -n <iterations>         Set number of kernel iterations (positive integer)\n");
@@ -220,13 +170,11 @@ int main(int argc, char *argv[])
 
     cli_options opts = {
         .stream_array_size      = 0,
-        .rd_percentage          = 50,
+        .rd_percentage          = 100,
         .pause_value            = 0,
-        .run_iterations         = NTIMES,
+        .run_iterations         = 1,
         .periodic_stats_ticks   = 0,
         .cli_skip_init          = 0,
-        .cli_skip_pre_m5_exit   = 0,
-        .cli_force_pre_m5_exit  = 0,
         .debug_enabled          = 0,
     };
     parse_args(argc, argv, &opts);
@@ -237,18 +185,15 @@ int main(int argc, char *argv[])
     int       run_iterations        = opts.run_iterations;
     long long periodic_stats_ticks  = opts.periodic_stats_ticks;
     int       cli_skip_init         = opts.cli_skip_init;
-    int       cli_skip_pre_m5_exit  = opts.cli_skip_pre_m5_exit;
-    int       cli_force_pre_m5_exit = opts.cli_force_pre_m5_exit;
     int       debug_enabled         = opts.debug_enabled;
 
     if (debug_enabled)
         {
             char dbg_msg[512];
             snprintf(dbg_msg, sizeof(dbg_msg),
-                "Finished parsing command line arguments: rd_percentage=%d, pause=%d, array_size=%lld, iterations=%d, periodic_stats_ticks=%lld, skip_init=%d, skip_pre_m5_exit=%d, force_pre_m5_exit=%d, debug_enabled=%d",
+                "Command line arguments: rd_percentage=%d, pause=%d, array_size=%lld, iterations=%d, periodic_stats_ticks=%lld, skip_init=%d, debug_enabled=%d",
                 rd_percentage, pause, STREAM_ARRAY_SIZE, run_iterations,
-                periodic_stats_ticks, cli_skip_init, cli_skip_pre_m5_exit,
-                cli_force_pre_m5_exit, debug_enabled);
+                periodic_stats_ticks, cli_skip_init, debug_enabled);
             debug_log_json(dbg_msg);
         }
    
@@ -413,17 +358,15 @@ int main(int argc, char *argv[])
             STREAM_copy_rw = &STREAM_copy_50;
             break;
     }
+
+    /* --- distribute requested storage across OpenMP threads --- */
     
-    if (debug_enabled)
-        debug_log_json("Selected STREAM kernel function");
-
-
-    /* --- distribute requested storage across MPI ranks --- */
-    array_elements = STREAM_ARRAY_SIZE;              // don't worry about rounding vs truncation
+    // Round up the array size to the nearest multiple of the kernel grain size
+    array_elements = STREAM_ARRAY_SIZE;             
     if (array_elements % STREAM_KERNEL_GRAIN_ELEMS != 0)
         array_elements += STREAM_KERNEL_GRAIN_ELEMS -
                           (array_elements % STREAM_KERNEL_GRAIN_ELEMS);
-    array_alignment = 64;                                       // Can be modified -- provides partial support for adjusting relative alignment
+    array_alignment = STREAM_ARRAY_ALIGNMENT; 
 
     // Dynamically allocate the three arrays using "posix_memalign()"
     array_bytes = array_elements * sizeof(STREAM_TYPE);
@@ -441,7 +384,7 @@ int main(int argc, char *argv[])
     }
 
     // Initial informational printouts -- rank 0 handles all the output
-    if (1)
+    if (debug_enabled)
     {
         printf(HLINE);
         printf("$ Memory bandwidth load kernel $\n");
@@ -449,15 +392,6 @@ int main(int argc, char *argv[])
         BytesPerWord = sizeof(STREAM_TYPE);
         printf("This system uses %d bytes per array element.\n",
         BytesPerWord);
-
-        printf(HLINE);
-        #ifdef N
-            printf("*****  WARNING: ******\n");
-            printf("      It appears that you set the preprocessor variable N when compiling this code.\n");
-            printf("      This version of the code uses the preprocesor variable STREAM_ARRAY_SIZE to control the array size\n");
-            printf("      Reverting to default value of STREAM_ARRAY_SIZE=%llu\n",(unsigned long long) STREAM_ARRAY_SIZE);
-            printf("*****  WARNING: ******\n");
-        #endif
 
         printf("Total Aggregate Array size = %llu (elements)\n" , (unsigned long long) STREAM_ARRAY_SIZE);
         printf("Total Aggregate Memory per array = %.1f MiB (= %.1f GiB).\n",
@@ -493,24 +427,23 @@ int main(int argc, char *argv[])
     }
 
     /* --- SETUP --- initialize arrays --- */
+    
+    if (!cli_skip_init)
     {
         if (debug_enabled)
             debug_log_json("Starting array initialization setup");
-        if (!cli_skip_init)
-        {
 #ifdef _OPENMP
-            #pragma omp parallel for
+        #pragma omp parallel for
 #endif
-            for (j=0; j<array_elements; j++)
-            {
-                a[j] = 1.0;
-                b[j] = 2.0;
-            }
+        for (j=0; j<array_elements; j++)
+        {
+            a[j] = 1.0;
+            b[j] = 2.0;
         }
         if (debug_enabled)
             debug_log_json("Finished array initialization setup");
     }
-
+    
     /*	--- MAIN LOOP --- repeat the kernel like STREAM --- */
     if (debug_enabled)
         debug_log_json("Entering ROI parallel section");
@@ -524,12 +457,26 @@ int main(int argc, char *argv[])
     {
         int thread_id = 0;
         int thread_count = 1;
-        int iter = 0;
+        int iter;
+        // total_blocks: total number of STREAM_KERNEL_GRAIN_ELEMS-sized blocks
+        // that make up the whole working set (array_elements is rounded up to
+        // a multiple of the grain, so this division is exact).
         ssize_t total_blocks = array_elements / STREAM_KERNEL_GRAIN_ELEMS;
+        // chunk: base number of blocks each thread gets when total_blocks is
+        // divided as evenly as possible across thread_count threads.
         ssize_t chunk = total_blocks;
+        // remainder: blocks left over after the even split; the first
+        // `remainder` threads each receive one extra block.
         ssize_t remainder = 0;
+        // local_blocks: number of blocks this particular thread will process
+        // (chunk, plus one extra if this thread is among the first `remainder`).
         ssize_t local_blocks = total_blocks;
+        // local_start: starting element index (offset into a/b) for this
+        // thread's slice; always a multiple of STREAM_KERNEL_GRAIN_ELEMS so
+        // each thread starts on a kernel-block boundary.
         ssize_t local_start = 0;
+        // local_elements: length, in elements, of this thread's slice
+        // (= local_blocks * STREAM_KERNEL_GRAIN_ELEMS); passed to the kernel.
         ssize_t local_elements = array_elements;
 
 #ifdef _OPENMP
@@ -537,6 +484,9 @@ int main(int argc, char *argv[])
         thread_count = omp_get_num_threads();
 #endif
 
+        // Per-thread partitioning of the total_blocks across thread_count
+        // OpenMP threads, distributing any remainder one block at a time to
+        // the lowest-numbered threads.
         chunk = total_blocks / thread_count;
         remainder = total_blocks % thread_count;
         local_blocks = chunk + (thread_id < remainder ? 1 : 0);
@@ -547,19 +497,17 @@ int main(int argc, char *argv[])
             debug_log_json("Computed thread partition for STREAM kernel");
 
 #ifdef _OPENMP
-        #pragma omp barrier
         #pragma omp master
 #endif
         {
             if (debug_enabled)
                 debug_log_json("Resetting gem5 statistics before timed region");
             m5_dump_reset_stats(0, 0);
-            if (periodic_stats_ticks > 0)
-            {
-                if (debug_enabled)
-                    debug_log_json("Enabling periodic gem5 statistics dumps");
-                m5_dump_stats(0, (uint64_t)periodic_stats_ticks);
-            }
+            
+            if (debug_enabled)
+                debug_log_json("Enabling periodic gem5 statistics dumps");    
+            m5_dump_stats(0, (uint64_t)periodic_stats_ticks);
+            
         }
 #ifdef _OPENMP
         #pragma omp barrier
@@ -591,22 +539,21 @@ int main(int argc, char *argv[])
         }
 
 #ifdef _OPENMP
+        #pragma omp barrier
         if (debug_enabled && thread_id < 4)
             debug_log_json("Thread reached final ROI barrier");
-        #pragma omp barrier
         #pragma omp master
 #endif
         {
             if (debug_enabled)
                 debug_log_json("Leaving ROI and dumping final gem5 statistics");
             m5_dump_stats(0, 0);
-            // End the simulation immediately after the timed region completes.
-            m5_exit(0);
+            
         }
     }
 
     free(a);
     free(b);
-
+    m5_exit(0);
     return(0);
 }
