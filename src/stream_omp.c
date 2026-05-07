@@ -456,8 +456,11 @@ int main(int argc, char *argv[])
         debug_log_json("Entering ROI parallel section");
     
     // Trigger Python to switch from ATOMIC CPU to O3 CPU precisely before the ROI
+    printf("Triggering Python to switch from ATOMIC CPU to O3 CPU precisely before the ROI\n");
     if (m5_enabled)
         m5_exit(0);
+
+    printf("Python has switched to O3 CPU\n");
 
 #ifdef _OPENMP
         #pragma omp parallel
