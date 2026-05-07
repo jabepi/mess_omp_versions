@@ -75,7 +75,7 @@ void m5_dump_stats(uint64_t delay, uint64_t period) {
 double * __restrict a, * __restrict b;
 ssize_t array_elements, array_bytes, array_alignment;
 
-const char *usage = "[-r <read_ratio>] [-p <pause>] [-s <array_size>] [-n <iterations>] [-P <period_ticks>] [-i] [-h]\n";
+const char *usage = "[-r <read_ratio>] [-p <pause>] [-s <array_size>] [-n <iterations>] [-P <period_ticks>] [-i] [-m] [-d] [-h]\n";
 
 void (*STREAM_copy_rw)(double *a_array, double *b_array,
                          ssize_t *array_size, const int* const pause) = NULL;
@@ -87,13 +87,14 @@ typedef struct {
     int       run_iterations;
     long long periodic_stats_ticks;
     int       cli_skip_init;
+    int       m5_enabled;
     int       debug_enabled;
 } cli_options;
 
 static void parse_args(int argc, char *argv[], cli_options *opts)
 {
     int opt;
-    while ((opt = getopt(argc, argv, ":r:p:s:n:P:idh")) != -1)
+    while ((opt = getopt(argc, argv, ":r:p:s:n:P:imdh")) != -1)
     {
         switch (opt)
         {
@@ -140,6 +141,9 @@ static void parse_args(int argc, char *argv[], cli_options *opts)
             case 'i':
                 opts->cli_skip_init = 1;
                 break;
+            case 'm':
+                opts->m5_enabled = 1;
+                break;
             case 'd':
                 opts->debug_enabled = 1;
                 break;
@@ -152,6 +156,7 @@ static void parse_args(int argc, char *argv[], cli_options *opts)
                 printf("  -n <iterations>         Set number of kernel iterations (positive integer)\n");
                 printf("  -P <period_ticks>       Set periodic statistics ticks interval (>= 0) waited to dump stats \n");
                 printf("  -i                      Skip stream array initialization\n");
+                printf("  -m                      Enable gem5 m5_* calls for gem5 (m5_exit, m5_dump_stats, ...)\n");
                 printf("  -d                      Enable debug logging\n");
                 printf("  -h                      Show this help message\n");
                 exit(0);
@@ -175,6 +180,7 @@ int main(int argc, char *argv[])
         .run_iterations         = 1,
         .periodic_stats_ticks   = 0,
         .cli_skip_init          = 0,
+        .m5_enabled             = 0,
         .debug_enabled          = 0,
     };
     parse_args(argc, argv, &opts);
@@ -185,15 +191,16 @@ int main(int argc, char *argv[])
     int       run_iterations        = opts.run_iterations;
     long long periodic_stats_ticks  = opts.periodic_stats_ticks;
     int       cli_skip_init         = opts.cli_skip_init;
+    int       m5_enabled            = opts.m5_enabled;
     int       debug_enabled         = opts.debug_enabled;
 
     if (debug_enabled)
         {
             char dbg_msg[512];
             snprintf(dbg_msg, sizeof(dbg_msg),
-                "Command line arguments: rd_percentage=%d, pause=%d, array_size=%lld, iterations=%d, periodic_stats_ticks=%lld, skip_init=%d, debug_enabled=%d",
+                "Command line arguments: rd_percentage=%d, pause=%d, array_size=%lld, iterations=%d, periodic_stats_ticks=%lld, skip_init=%d, m5_enabled=%d, debug_enabled=%d",
                 rd_percentage, pause, STREAM_ARRAY_SIZE, run_iterations,
-                periodic_stats_ticks, cli_skip_init, debug_enabled);
+                periodic_stats_ticks, cli_skip_init, m5_enabled, debug_enabled);
             debug_log_json(dbg_msg);
         }
    
@@ -449,7 +456,8 @@ int main(int argc, char *argv[])
         debug_log_json("Entering ROI parallel section");
     
     // Trigger Python to switch from ATOMIC CPU to O3 CPU precisely before the ROI
-    m5_exit(0);
+    if (m5_enabled)
+        m5_exit(0);
 
 #ifdef _OPENMP
         #pragma omp parallel
@@ -500,14 +508,16 @@ int main(int argc, char *argv[])
         #pragma omp master
 #endif
         {
-            if (debug_enabled)
-                debug_log_json("Resetting gem5 statistics before timed region");
-            m5_dump_reset_stats(0, 0);
-            
-            if (debug_enabled)
-                debug_log_json("Enabling periodic gem5 statistics dumps");    
-            m5_dump_stats(0, (uint64_t)periodic_stats_ticks);
-            
+            if (m5_enabled)
+            {
+                if (debug_enabled)
+                    debug_log_json("Resetting gem5 statistics before timed region");
+                m5_dump_reset_stats(0, 0);
+
+                if (debug_enabled)
+                    debug_log_json("Enabling periodic gem5 statistics dumps");
+                m5_dump_stats(0, (uint64_t)periodic_stats_ticks);
+            }
         }
 #ifdef _OPENMP
         #pragma omp barrier
@@ -545,15 +555,18 @@ int main(int argc, char *argv[])
         #pragma omp master
 #endif
         {
-            if (debug_enabled)
-                debug_log_json("Leaving ROI and dumping final gem5 statistics");
-            m5_dump_stats(0, 0);
-            
+            if (m5_enabled)
+            {
+                if (debug_enabled)
+                    debug_log_json("Leaving ROI and dumping final gem5 statistics");
+                m5_dump_stats(0, 0);
+            }
         }
     }
 
     free(a);
     free(b);
-    m5_exit(0);
+    if (m5_enabled)
+        m5_exit(0);
     return(0);
 }
