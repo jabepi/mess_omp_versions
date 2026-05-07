@@ -178,7 +178,7 @@ int main(int argc, char *argv[])
         .rd_percentage          = 100,
         .pause_value            = 0,
         .run_iterations         = 1,
-        .periodic_stats_ticks   = 0,
+        .periodic_stats_ticks   = 10000,
         .cli_skip_init          = 0,
         .m5_enabled             = 0,
         .debug_enabled          = 0,
