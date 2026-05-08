@@ -42,9 +42,6 @@ mpirun -n 16 ./bin/stream_mpi.x -r 64 -p 1000
 ```
 The **-r** parameter is the required RD ratio in the total traffic (from 50 to 100, with a step of 2), while the **-p** parameter is the introduced pause. For the maximum bandwidth, set this parameter to 0.
 When using the OpenMP GEM5 port, keep `OMP_NUM_THREADS` aligned with the simulated CPU count and prefer `OMP_PROC_BIND=close` plus `OMP_PLACES=cores` for deterministic placement.
-Use `-t` to enable pointer chasing on OpenMP thread 0; in that mode, thread 0 runs only pointer chase and STREAM work is distributed across threads 1..N-1.
-Without `-t`, all threads run STREAM and pointer chase is disabled.
-Pointer-chase behavior can be tuned with `-c` (nodes), `-x` (iterations), `-l` (dependent loads per iteration), and `-w` (walk file path).
 
 The example above displays the following output:
 
