@@ -41,6 +41,14 @@ Here is the example of running the benchmark with 16 MPI processes, with 64\% of
 mpirun -n 16 ./bin/stream_mpi.x -r 64 -p 1000
 ```
 The **-r** parameter is the required RD ratio in the total traffic (from 50 to 100, with a step of 2), while the **-p** parameter is the introduced pause. For the maximum bandwidth, set this parameter to 0.
+For the OpenMP pointer-chase path, use:
+
+- `-t 1` to enable thread 0 as a dedicated pointer-chase thread (`-t 0` keeps all threads on STREAM copy)
+- `-c <chase_elems>` to control pointer-chase nodes (cache-line nodes)
+- `-x <chase_iters>` and `-l <loads_per_iter>` to control pointer-chase work per kernel call
+- `-w <walk_file>` to load/save the deterministic pointer walk (default `array.dat`)
+
+When `-t 1` is used, thread 0 runs pointer-chasing while the remaining threads run the STREAM kernel.
 When using the OpenMP GEM5 port, keep `OMP_NUM_THREADS` aligned with the simulated CPU count and prefer `OMP_PROC_BIND=close` plus `OMP_PLACES=cores` for deterministic placement.
 
 The example above displays the following output:
