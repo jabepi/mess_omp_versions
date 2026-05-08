@@ -502,6 +502,7 @@ int main(int argc, char *argv[])
             debug_log_json("Computed thread partition for STREAM kernel");
 
 #ifdef _OPENMP
+        #pragma omp barrier
         #pragma omp master
 #endif
         {
@@ -560,10 +561,10 @@ int main(int argc, char *argv[])
             }
         }
     }
-
-    free(a);
-    free(b);
     if (m5_enabled)
         m5_exit(0);
+    
+    free(a);
+    free(b);
     return(0);
 }

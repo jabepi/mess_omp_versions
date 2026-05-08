@@ -17,16 +17,16 @@ init:
 	mkdir -p $(BUILDDIR)
 
 $(BUILDDIR)/nop.o: $(SRCDIR)/nop.c
-	$(CC) $(CFLAGS) -O3 -c $< -o $@
+	$(CC) $(CFLAGS) -O0 -c $< -o $@
 
 $(BUILDDIR)/utils.o: $(SRCDIR)/utils.c
-	$(CC) $(CFLAGS) -Wno-unused-but-set-variable -O3 -c $< -o $@
+	$(CC) $(CFLAGS) -Wno-unused-but-set-variable -O0 -c $< -o $@
 
 $(BUILDDIR)/stream_omp_c.o: $(SRCDIR)/stream_omp.c
-	$(CC) $(CFLAGS)  -O3 -c $< -o $@
+	$(CC) $(CFLAGS)  -O0 -c $< -o $@
 
 $(TARGET): $(BUILDDIR)/nop.o $(BUILDDIR)/utils.o $(BUILDDIR)/stream_omp_c.o
-	$(CC) $(CFLAGS)  -O3 $(LDFLAGS) $^ -o $@
+	$(CC) $(CFLAGS)  -O0 $(LDFLAGS) $^ -o $@
 
 clean:
 	rm -f $(BUILDDIR)/*.o *.x
