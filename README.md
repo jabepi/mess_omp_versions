@@ -84,3 +84,10 @@ Loads are performed using instruction [```vmovupd```](https://www.felixcloutier.
 Stores using instruction [```vmovntpd```](https://www.felixcloutier.com/x86/movntpd) that stores 256b (32B) from register ```%ymm1``` to a given memory address, using non-temporal hint to bypass the cache ([More info on non-temporal memory instructions, Section 6.1](https://lwn.net/Articles/255364/)].
 
 Blocks of load and store instructions are interleaved with a call to function ```nop``` implemented in file ***nop.c***. This function takes the number of ```nop``` instructions to execute as an argument ```pause``` passed through register ```rdi```. Note: pay attention to the difference between the function ```nop``` and nop instruction.
+
+
+# Excution command
+The debugg option now is not necesary 
+```
+/home/gem5/mess_omp_versions/stream_omp.x -r 100 -p 0 -s 12800000 -n 3 -P 10000 -m -d
+```

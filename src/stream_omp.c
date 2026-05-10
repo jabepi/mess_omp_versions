@@ -439,9 +439,7 @@ int main(int argc, char *argv[])
     {
         if (debug_enabled)
             debug_log_json("Starting array initialization setup");
-#ifdef _OPENMP
-        #pragma omp parallel for
-#endif
+
         for (j=0; j<array_elements; j++)
         {
             a[j] = 1.0;
