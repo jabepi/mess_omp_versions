@@ -100,9 +100,9 @@ static void parse_args(int argc, char *argv[], cli_options *opts)
         {
             case 'r':
                 opts->rd_percentage = atoi(optarg);
-                if (opts->rd_percentage < 0 || opts->rd_percentage > 100)
+                if (opts->rd_percentage < 0 || opts->rd_percentage > 100 || opts->rd_percentage % 2 != 0)
                 {
-                    printf("ERROR: RD ratio has to be even number between 50 and 100.\n");
+                    printf("ERROR: RD ratio has to be even number between 0 and 100.\n");
                     exit(-1);
                 }
                 break;
