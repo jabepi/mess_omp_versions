@@ -110,8 +110,7 @@ static void shuffle_u64(uint64_t *array, uint64_t n)
 
 static void generate_pointer_walk(struct pointer_chase_line *walk_array, uint64_t elems)
 {
-    uint64_t *seq;
-    uint64_t *res;
+    uint64_t *perm;
     uint64_t j;
 
     if (elems == 0)
@@ -123,39 +122,84 @@ static void generate_pointer_walk(struct pointer_chase_line *walk_array, uint64_
         return;
     }
 
-    seq = (uint64_t *)malloc((elems - 1) * sizeof(uint64_t));
-    res = (uint64_t *)malloc(elems * sizeof(uint64_t));
+    perm = (uint64_t *)malloc(elems * sizeof(uint64_t));
 
-    if (seq == NULL || res == NULL)
+    if (perm == NULL)
     {
         fprintf(stderr, "WARNING: pointer-chase permutation allocation failed; using sequential ring.\n");
         for (j = 0; j < elems; j++)
             walk_array[j].next_offset = ((j + 1) % elems) * POINTER_CHASE_CACHE_LINE;
-        free(seq);
-        free(res);
+        free(perm);
         return;
     }
 
-    for (j = 1; j < elems; j++)
-        seq[j - 1] = j;
+    for (j = 0; j < elems; j++)
+        perm[j] = j;
 
-    shuffle_u64(seq, elems - 1);
-
-    res[0] = seq[0];
-    {
-        uint64_t cursor = res[0];
-        for (j = 0; j < elems - 1; j++)
-        {
-            res[cursor] = seq[j];
-            cursor = res[cursor];
-        }
-    }
+    shuffle_u64(perm, elems);
 
     for (j = 0; j < elems; j++)
-        walk_array[j].next_offset = res[j] * POINTER_CHASE_CACHE_LINE;
+    {
+        uint64_t cur = perm[j];
+        uint64_t next = perm[(j + 1) % elems];
+        walk_array[cur].next_offset = next * POINTER_CHASE_CACHE_LINE;
+    }
 
-    free(seq);
-    free(res);
+    free(perm);
+}
+
+static int validate_pointer_walk(const struct pointer_chase_line *walk_array, uint64_t elems)
+{
+    uint8_t *in_degree = NULL;
+    uint8_t *visited = NULL;
+    uint64_t i;
+    uint64_t node = 0;
+    int ok = 0;
+
+    if (walk_array == NULL || elems == 0)
+        return 0;
+
+    in_degree = (uint8_t *)calloc(elems, sizeof(uint8_t));
+    visited = (uint8_t *)calloc(elems, sizeof(uint8_t));
+    if (in_degree == NULL || visited == NULL)
+        goto cleanup;
+
+    for (i = 0; i < elems; i++)
+    {
+        uint64_t next_offset = walk_array[i].next_offset;
+        uint64_t next_idx;
+        if ((next_offset % POINTER_CHASE_CACHE_LINE) != 0)
+            goto cleanup;
+        next_idx = next_offset / POINTER_CHASE_CACHE_LINE;
+        if (next_idx >= elems)
+            goto cleanup;
+        in_degree[next_idx]++;
+        if (in_degree[next_idx] > 1)
+            goto cleanup;
+    }
+
+    for (i = 0; i < elems; i++)
+    {
+        if (visited[node] != 0)
+            goto cleanup;
+        visited[node] = 1;
+        node = walk_array[node].next_offset / POINTER_CHASE_CACHE_LINE;
+    }
+
+    if (node != 0)
+        goto cleanup;
+    for (i = 0; i < elems; i++)
+    {
+        if (visited[i] == 0)
+            goto cleanup;
+    }
+
+    ok = 1;
+
+cleanup:
+    free(in_degree);
+    free(visited);
+    return ok;
 }
 
 static int load_pointer_walk_file(const char *walk_file_path,
@@ -191,6 +235,8 @@ static int load_pointer_walk_file(const char *walk_file_path,
     }
 
     fclose(input_file);
+    if (!validate_pointer_walk(walk_array, elems))
+        return -1;
     return 0;
 }
 
