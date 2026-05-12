@@ -26,13 +26,10 @@ static void agent_debug_log(const char *run_id,
                             const char *message,
                             const char *data_json)
 {
-    FILE *fp = fopen("/Users/javier/Documents/BSC/Projects/GEM5/mess_gem5/fix_deadlock/.cursor/debug-f14fa3.log", "a");
-    if (fp == NULL)
-        return;
-    fprintf(fp,
+    fprintf(stdout,
             "{\"sessionId\":\"f14fa3\",\"runId\":\"%s\",\"hypothesisId\":\"%s\",\"location\":\"%s\",\"message\":\"%s\",\"data\":%s,\"timestamp\":%lld}\n",
             run_id, hypothesis_id, location, message, data_json, debug_now_ms());
-    fclose(fp);
+    fflush(stdout);
 }
 
 static void debug_log_json(const char *message)
