@@ -19,6 +19,22 @@ static long long debug_now_ms(void)
     gettimeofday(&tv, NULL);
     return ((long long)tv.tv_sec * 1000LL) + ((long long)tv.tv_usec / 1000LL);
 }
+
+static void agent_debug_log(const char *run_id,
+                            const char *hypothesis_id,
+                            const char *location,
+                            const char *message,
+                            const char *data_json)
+{
+    FILE *fp = fopen("/Users/javier/Documents/BSC/Projects/GEM5/mess_gem5/fix_deadlock/.cursor/debug-f14fa3.log", "a");
+    if (fp == NULL)
+        return;
+    fprintf(fp,
+            "{\"sessionId\":\"f14fa3\",\"runId\":\"%s\",\"hypothesisId\":\"%s\",\"location\":\"%s\",\"message\":\"%s\",\"data\":%s,\"timestamp\":%lld}\n",
+            run_id, hypothesis_id, location, message, data_json, debug_now_ms());
+    fclose(fp);
+}
+
 static void debug_log_json(const char *message)
 {
     fprintf(stdout, "{\"message\":\"%s\",\"timestamp\":%lld}\n", message, debug_now_ms());
@@ -193,6 +209,16 @@ int main(int argc, char *argv[])
     int       cli_skip_init         = opts.cli_skip_init;
     int       m5_enabled            = opts.m5_enabled;
     int       debug_enabled         = opts.debug_enabled;
+
+    // #region agent log
+    {
+        char data_json[384];
+        snprintf(data_json, sizeof(data_json),
+                 "{\"rd_percentage\":%d,\"pause\":%d,\"stream_array_size\":%lld,\"run_iterations\":%d,\"skip_init\":%d,\"omp_max_threads\":%d}",
+                 rd_percentage, pause, STREAM_ARRAY_SIZE, run_iterations, cli_skip_init, omp_get_max_threads());
+        agent_debug_log("pre-fix", "H1-H4", "src/stream_omp.c:main", "run configuration", data_json);
+    }
+    // #endregion
 
     if (debug_enabled)
         {
@@ -437,6 +463,7 @@ int main(int argc, char *argv[])
     
     if (!cli_skip_init)
     {
+        double init_start = omp_get_wtime();
         if (debug_enabled)
             debug_log_json("Starting array initialization setup");
 
@@ -445,6 +472,15 @@ int main(int argc, char *argv[])
             a[j] = 1.0;
             b[j] = 2.0;
         }
+        // #region agent log
+        {
+            char data_json[320];
+            snprintf(data_json, sizeof(data_json),
+                     "{\"mode\":\"serial\",\"array_elements\":%lld,\"array_bytes\":%lld,\"init_seconds\":%.6f}",
+                     (long long)array_elements, (long long)array_bytes, omp_get_wtime() - init_start);
+            agent_debug_log("pre-fix", "H2", "src/stream_omp.c:init", "array initialization completed", data_json);
+        }
+        // #endregion
         if (debug_enabled)
             debug_log_json("Finished array initialization setup");
     }
@@ -496,6 +532,16 @@ int main(int argc, char *argv[])
         local_start = ((thread_id * chunk) + MIN(thread_id, remainder)) *
                       STREAM_KERNEL_GRAIN_ELEMS;
         local_elements = local_blocks * STREAM_KERNEL_GRAIN_ELEMS;
+        if (thread_id == 0)
+        {
+            // #region agent log
+            char data_json[320];
+            snprintf(data_json, sizeof(data_json),
+                     "{\"thread_count\":%d,\"total_blocks\":%lld,\"chunk\":%lld,\"remainder\":%lld,\"array_elements\":%lld}",
+                     thread_count, (long long)total_blocks, (long long)chunk, (long long)remainder, (long long)array_elements);
+            agent_debug_log("pre-fix", "H1-H3", "src/stream_omp.c:partition", "parallel partition summary", data_json);
+            // #endregion
+        }
         if (debug_enabled && thread_id < 4)
             debug_log_json("Computed thread partition for STREAM kernel");
 
@@ -528,12 +574,25 @@ int main(int argc, char *argv[])
             }
             if (local_elements > 0)
             {
+                double iter_start = 0.0;
+                if (iter == 0)
+                    iter_start = omp_get_wtime();
                 if (iter == 0 && thread_id == 0)
                 {
                     if (debug_enabled)
                         debug_log_json("Calling STREAM kernel function for the first time");
                 }
                 STREAM_copy_rw(a + local_start, b + local_start, &local_elements, &pause);
+                if (iter == 0)
+                {
+                    // #region agent log
+                    char data_json[320];
+                    snprintf(data_json, sizeof(data_json),
+                             "{\"thread_id\":%d,\"thread_count\":%d,\"local_start\":%lld,\"local_elements\":%lld,\"iter0_seconds\":%.6f}",
+                             thread_id, thread_count, (long long)local_start, (long long)local_elements, omp_get_wtime() - iter_start);
+                    agent_debug_log("pre-fix", "H1-H4", "src/stream_omp.c:kernel_iter0", "thread first-iteration sample", data_json);
+                    // #endregion
+                }
                 if (debug_enabled && iter == 0 && thread_id < 2)
                     debug_log_json("Finished first STREAM kernel call sample");
             }
