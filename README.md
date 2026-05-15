@@ -55,7 +55,8 @@ After warmup, the code prints one machine-readable line with:
 `<measured_bandwidth_MB_s> <avg_pointer_chase_latency_ns>`
 
 measured over the same concurrent window.
-The measured region is synchronized per iteration (STREAM workers and pointer chase progress in lockstep), so latency and bandwidth come from the same phase.
+The measured region is synchronized per iteration: STREAM workers execute one STREAM chunk while thread 0 keeps pointer-chasing until those workers finish that chunk.
+This keeps latency sampling overlapped with the full STREAM measured phase.
 For stable pairs, use enough total iterations (for example `-n 20 -u 6`).
 If `-u` is too large relative to `-n`, warmup is clipped to keep at least one measured iteration.
 When using the OpenMP GEM5 port, keep `OMP_NUM_THREADS` aligned with the simulated CPU count and prefer `OMP_PROC_BIND=close` plus `OMP_PLACES=cores` for deterministic placement.
