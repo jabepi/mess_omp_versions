@@ -298,15 +298,22 @@ static void init_pointer_walk(const char *walk_file_path,
 static uint64_t pointer_chase_kernel(struct pointer_chase_line *walk_array,
                                      uint64_t elems,
                                      int chase_iterations,
-                                     int chase_loads_per_iter)
+                                     int chase_loads_per_iter,
+                                     uint64_t *next_offset_state)
 {
     uint64_t iter;
     uint64_t step;
     uint64_t next_offset = 0;
     uint8_t *base_addr;
+    uint64_t max_offset;
 
-    if (walk_array == NULL || elems == 0 || chase_iterations <= 0 || chase_loads_per_iter <= 0)
+    if (walk_array == NULL || elems == 0 || chase_iterations <= 0 || chase_loads_per_iter <= 0 ||
+        next_offset_state == NULL)
         return 0;
+
+    max_offset = elems * POINTER_CHASE_CACHE_LINE;
+    if (*next_offset_state < max_offset && ((*next_offset_state % POINTER_CHASE_CACHE_LINE) == 0))
+        next_offset = *next_offset_state;
 
     base_addr = (uint8_t *)walk_array;
     for (iter = 0; iter < (uint64_t)chase_iterations; iter++)
@@ -318,6 +325,7 @@ static uint64_t pointer_chase_kernel(struct pointer_chase_line *walk_array,
         }
     }
 
+    *next_offset_state = next_offset;
     return next_offset;
 }
 
@@ -485,7 +493,7 @@ int main(int argc, char *argv[])
         .stream_array_size      = 0,
         .rd_percentage          = 100,
         .pause_value            = 0,
-        .run_iterations         = 1,
+        .run_iterations         = 12,
         .periodic_stats_ticks   = 10000,
         .cli_skip_init          = 0,
         .m5_enabled             = 0,
@@ -495,7 +503,7 @@ int main(int argc, char *argv[])
         .chase_loads_per_iter   = 64,
         .walk_file_path         = "array.dat",
         .thread0_pointer_chase  = 0,
-        .warmup_iterations      = 2,
+        .warmup_iterations      = 4,
     };
     parse_args(argc, argv, &opts);
 
@@ -519,6 +527,7 @@ int main(int argc, char *argv[])
     uint64_t pointer_chase_total_ns = 0;
     unsigned long long pointer_chase_total_loads = 0ULL;
     uint64_t pointer_chase_measure_window_ns = 0;
+    uint64_t pointer_chase_next_offset = 0;
     unsigned long long stream_measured_iterations = 0ULL;
     volatile int stream_workers_done = 0;
     int stream_workers_remaining = 0;
@@ -875,6 +884,13 @@ int main(int argc, char *argv[])
         if (effective_warmup_iters < 0)
             effective_warmup_iters = 0;
         measured_iters = run_iterations - effective_warmup_iters;
+        if (thread0_pointer_chase && run_iterations >= 3 && measured_iters < 3)
+        {
+            measured_iters = 3;
+            effective_warmup_iters = run_iterations - measured_iters;
+            if (effective_warmup_iters < 0)
+                effective_warmup_iters = 0;
+        }
 
 #ifdef _OPENMP
         #pragma omp barrier
@@ -929,7 +945,8 @@ int main(int argc, char *argv[])
                         uint64_t chase_value = pointer_chase_kernel(chase_array,
                                                                     (uint64_t)chase_array_elems,
                                                                     chase_iterations,
-                                                                    chase_loads_per_iter);
+                                                                    chase_loads_per_iter,
+                                                                    &pointer_chase_next_offset);
                         uint64_t chase_end_ns = now_ns();
                         chase_sink ^= chase_value;
                         pointer_chase_total_ns += (chase_end_ns - chase_begin_ns);
@@ -945,7 +962,8 @@ int main(int argc, char *argv[])
                         uint64_t chase_value = pointer_chase_kernel(chase_array,
                                                                     (uint64_t)chase_array_elems,
                                                                     chase_iterations,
-                                                                    chase_loads_per_iter);
+                                                                    chase_loads_per_iter,
+                                                                    &pointer_chase_next_offset);
                         uint64_t chase_end_ns = now_ns();
                         chase_sink ^= chase_value;
                         pointer_chase_total_ns += (chase_end_ns - chase_begin_ns);

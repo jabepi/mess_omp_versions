@@ -47,7 +47,7 @@ For the OpenMP pointer-chase path, use:
 - `-c <chase_elems>` to control pointer-chase nodes (cache-line nodes)
 - `-x <chase_iters>` and `-l <loads_per_iter>` to control pointer-chase work per kernel call
 - `-w <walk_file>` to load/save the deterministic pointer walk (default `array.dat`)
-- `-u <warmup_iters>` to run STREAM-only warmup iterations before pointer-chase latency is measured (default `2`)
+- `-u <warmup_iters>` to run STREAM-only warmup iterations before pointer-chase latency is measured (default `4`)
 
 When `-t 1` is used, thread 0 runs pointer-chasing while the remaining threads run the STREAM kernel.
 After warmup, the code prints one machine-readable line with:
@@ -55,6 +55,8 @@ After warmup, the code prints one machine-readable line with:
 `<measured_bandwidth_MB_s> <avg_pointer_chase_latency_ns>`
 
 measured over the same concurrent window.
+For stable pairs, use enough total iterations (for example `-n 20 -u 6`).
+If `-u` is too large relative to `-n`, warmup is clipped to keep at least one measured iteration.
 When using the OpenMP GEM5 port, keep `OMP_NUM_THREADS` aligned with the simulated CPU count and prefer `OMP_PROC_BIND=close` plus `OMP_PLACES=cores` for deterministic placement.
 
 The example above displays the following output:
