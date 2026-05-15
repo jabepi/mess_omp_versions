@@ -52,7 +52,7 @@ For the OpenMP pointer-chase path, use:
 When `-t 1` is used, thread 0 runs pointer-chasing while the remaining threads run the STREAM kernel.
 After warmup, the code prints one machine-readable line with:
 
-`<measured_bandwidth_MB_s> <avg_pointer_chase_latency_ns>`
+`<measured_bandwidth_MB_s> <avg_pointer_chase_latency_cycles>`
 
 measured over the same concurrent window.
 The measured region is synchronized per iteration: STREAM workers execute one STREAM chunk while thread 0 keeps pointer-chasing until those workers finish that chunk.
