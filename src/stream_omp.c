@@ -529,8 +529,6 @@ int main(int argc, char *argv[])
     uint64_t pointer_chase_measure_window_ns = 0;
     uint64_t pointer_chase_next_offset = 0;
     unsigned long long stream_measured_iterations = 0ULL;
-    volatile int stream_workers_done = 0;
-    int stream_workers_remaining = 0;
 
     if (debug_enabled)
         {
@@ -922,84 +920,40 @@ int main(int argc, char *argv[])
                 #pragma omp barrier
 #endif
             }
-#ifdef _OPENMP
-            #pragma omp single
-#endif
-            {
-            stream_workers_remaining = stream_worker_count;
-            stream_workers_done = (stream_worker_count == 0) ? 1 : 0;
             stream_measured_iterations = (unsigned long long)measured_iters;
-            }
-#ifdef _OPENMP
-            #pragma omp barrier
-#endif
 
             if (thread_id == 0)
+                pointer_chase_measure_window_ns = now_ns();
+
+            for (iter = 0; iter < measured_iters; iter++)
             {
-                uint64_t chase_window_begin_ns = now_ns();
-                if (stream_worker_count == 0)
+                if (thread_id == 0)
                 {
-                    for (iter = 0; iter < measured_iters; iter++)
-                    {
-                        uint64_t chase_begin_ns = now_ns();
-                        uint64_t chase_value = pointer_chase_kernel(chase_array,
-                                                                    (uint64_t)chase_array_elems,
-                                                                    chase_iterations,
-                                                                    chase_loads_per_iter,
-                                                                    &pointer_chase_next_offset);
-                        uint64_t chase_end_ns = now_ns();
-                        chase_sink ^= chase_value;
-                        pointer_chase_total_ns += (chase_end_ns - chase_begin_ns);
-                        pointer_chase_total_loads += (unsigned long long)chase_iterations *
-                                                     (unsigned long long)chase_loads_per_iter;
-                    }
+                    uint64_t chase_begin_ns = now_ns();
+                    uint64_t chase_value = pointer_chase_kernel(chase_array,
+                                                                (uint64_t)chase_array_elems,
+                                                                chase_iterations,
+                                                                chase_loads_per_iter,
+                                                                &pointer_chase_next_offset);
+                    uint64_t chase_end_ns = now_ns();
+                    chase_sink ^= chase_value;
+                    pointer_chase_total_ns += (chase_end_ns - chase_begin_ns);
+                    pointer_chase_total_loads += (unsigned long long)chase_iterations *
+                                                 (unsigned long long)chase_loads_per_iter;
                 }
-                else
+                else if (local_elements > 0)
                 {
-                    while (1)
-                    {
-                        uint64_t chase_begin_ns = now_ns();
-                        uint64_t chase_value = pointer_chase_kernel(chase_array,
-                                                                    (uint64_t)chase_array_elems,
-                                                                    chase_iterations,
-                                                                    chase_loads_per_iter,
-                                                                    &pointer_chase_next_offset);
-                        uint64_t chase_end_ns = now_ns();
-                        chase_sink ^= chase_value;
-                        pointer_chase_total_ns += (chase_end_ns - chase_begin_ns);
-                        pointer_chase_total_loads += (unsigned long long)chase_iterations *
-                                                     (unsigned long long)chase_loads_per_iter;
-#ifdef _OPENMP
-                        #pragma omp flush(stream_workers_done)
-#endif
-                        if (stream_workers_done)
-                            break;
-                    }
-                }
-                pointer_chase_measure_window_ns = now_ns() - chase_window_begin_ns;
-            }
-            else if (local_elements > 0)
-            {
-                if (debug_enabled && thread_id < 2)
-                {
-                    debug_log_json("Thread entering STREAM loop while thread 0 chases pointers");
-                }
-                for (iter = 0; iter < measured_iters; iter++)
+                    if (debug_enabled && iter == 0 && thread_id < 2)
+                        debug_log_json("Thread entering synchronized STREAM/pointer-chase measurement loop");
                     STREAM_copy_rw(a + local_start, b + local_start, &local_elements, &pause);
-#ifdef _OPENMP
-                if (stream_worker_count > 0)
-                {
-                    int remaining_after = 0;
-                    #pragma omp atomic capture
-                    remaining_after = --stream_workers_remaining;
-                    if (remaining_after == 0)
-                    {
-                        stream_workers_done = 1;
-                        #pragma omp flush(stream_workers_done)
-                    }
                 }
+#ifdef _OPENMP
+                #pragma omp barrier
 #endif
             }
+
+            if (thread_id == 0)
+                pointer_chase_measure_window_ns = now_ns() - pointer_chase_measure_window_ns;
         }
         else
         {
