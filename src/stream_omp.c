@@ -985,7 +985,7 @@ int main(int argc, char *argv[])
         #pragma omp master
 #endif
         {
-            if (thread0_pointer_chase && debug_enabled)
+            if (thread0_pointer_chase)
             {
                 char ptr_dbg_msg[256];
                 double latency_ns = 0.0;
