@@ -549,10 +549,9 @@ int main(int argc, char *argv[])
     int warmup_iterations           = opts.warmup_iterations;
     struct pointer_chase_line *chase_array = NULL;
     volatile uint64_t chase_sink = 0;
-    uint64_t pointer_chase_total_ns = 0;
     uint64_t pointer_chase_total_cycles = 0;
     unsigned long long pointer_chase_total_loads = 0ULL;
-    uint64_t pointer_chase_measure_window_ns = 0;
+    uint64_t pointer_chase_measure_window_cycles = 0;
     uint64_t pointer_chase_next_offset = 0;
     unsigned long long stream_measured_iterations = 0ULL;
     volatile int stream_iter_done = 0;
@@ -952,7 +951,7 @@ int main(int argc, char *argv[])
             stream_measured_iterations = (unsigned long long)measured_iters;
 
             if (thread_id == 0)
-                pointer_chase_measure_window_ns = now_ns();
+                pointer_chase_measure_window_cycles = now_cycles();
 
             for (iter = 0; iter < measured_iters; iter++)
             {
@@ -971,17 +970,14 @@ int main(int argc, char *argv[])
                 {
                     while (1)
                     {
-                        uint64_t chase_begin_ns = now_ns();
                         uint64_t chase_begin_cycles = now_cycles();
                         uint64_t chase_value = pointer_chase_kernel(chase_array,
                                                                     (uint64_t)chase_array_elems,
                                                                     chase_iterations,
                                                                     chase_loads_per_iter,
                                                                     &pointer_chase_next_offset);
-                        uint64_t chase_end_ns = now_ns();
                         uint64_t chase_end_cycles = now_cycles();
                         chase_sink ^= chase_value;
-                        pointer_chase_total_ns += (chase_end_ns - chase_begin_ns);
                         if (chase_end_cycles >= chase_begin_cycles)
                             pointer_chase_total_cycles += (chase_end_cycles - chase_begin_cycles);
                         pointer_chase_total_loads += (unsigned long long)chase_iterations *
@@ -1018,7 +1014,7 @@ int main(int argc, char *argv[])
             }
 
             if (thread_id == 0)
-                pointer_chase_measure_window_ns = now_ns() - pointer_chase_measure_window_ns;
+                pointer_chase_measure_window_cycles = now_cycles() - pointer_chase_measure_window_cycles;
         }
         else
         {
@@ -1058,19 +1054,17 @@ int main(int argc, char *argv[])
             if (thread0_pointer_chase)
             {
                 char ptr_dbg_msg[256];
-                double latency_ns = 0.0;
+                double latency_sim_ns = 0.0;
                 double latency_cycles = 0.0;
                 double measured_bw_mb_s = 0.0;
-                if (pointer_chase_total_loads > 0ULL)
-                    latency_ns = (double)pointer_chase_total_ns /
-                                 (double)pointer_chase_total_loads;
                 if (pointer_chase_total_loads > 0ULL && pointer_chase_total_cycles > 0ULL)
                     latency_cycles = (double)pointer_chase_total_cycles /
                                      (double)pointer_chase_total_loads;
-                else if (pointer_chase_total_loads > 0ULL && arch_timer_hz > 0ULL)
-                    latency_cycles = latency_ns * ((double)arch_timer_hz / 1.0e9);
+                if (latency_cycles > 0.0 && arch_timer_hz > 0ULL)
+                    latency_sim_ns = latency_cycles * (1.0e9 / (double)arch_timer_hz);
                 if (stream_worker_count > 0 &&
-                    pointer_chase_measure_window_ns > 0ULL &&
+                    pointer_chase_measure_window_cycles > 0ULL &&
+                    arch_timer_hz > 0ULL &&
                     stream_measured_iterations > 0ULL)
                 {
                     double measured_bytes = (double)stream_measured_iterations *
@@ -1078,24 +1072,23 @@ int main(int argc, char *argv[])
                                             (double)sizeof(STREAM_TYPE) *
                                             2.0;
                     measured_bw_mb_s = measured_bytes /
-                                       ((double)pointer_chase_measure_window_ns / 1.0e9) /
+                                       ((double)pointer_chase_measure_window_cycles / (double)arch_timer_hz) /
                                        1.0e6;
                 }
                 snprintf(ptr_dbg_msg, sizeof(ptr_dbg_msg),
-                         "Pointer-chase: sink=%llu total_ns=%llu total_cycles=%llu total_loads=%llu avg_latency_ns=%.6f avg_latency_cycles=%.6f measured_bw_MB_s=%.6f warmup_iters=%d measured_iters=%llu timer_hz=%llu",
+                         "Pointer-chase: sink=%llu total_cycles=%llu total_loads=%llu avg_latency_cycles=%.6f avg_latency_ns=%.6f measured_bw_MB_s=%.6f warmup_iters=%d measured_iters=%llu timer_hz=%llu",
                          (unsigned long long)chase_sink,
-                         (unsigned long long)pointer_chase_total_ns,
                          (unsigned long long)pointer_chase_total_cycles,
                          pointer_chase_total_loads,
-                         latency_ns,
                          latency_cycles,
+                         latency_sim_ns,
                          measured_bw_mb_s,
                          effective_warmup_iters,
                          stream_measured_iterations,
                          (unsigned long long)arch_timer_hz);
                 debug_log_json(ptr_dbg_msg);
                 if (stream_worker_count > 0)
-                    printf("%.6f %.6f\n", measured_bw_mb_s, latency_cycles);
+                    printf("%.6f %.6f\n", measured_bw_mb_s, latency_sim_ns);
             }
             if (m5_enabled)
             {
