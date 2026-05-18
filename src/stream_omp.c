@@ -341,16 +341,10 @@ static uint64_t pointer_chase_kernel(struct pointer_chase_line *walk_array,
                                      uint64_t elems,
                                      int chase_iterations,
                                      int chase_loads_per_iter,
-                                     uint64_t *next_offset_state,
-                                     uint64_t split_loads,
-                                     uint64_t *split_cycles_out,
-                                     uint64_t *split_loads_out,
-                                     uint64_t *rest_cycles_out,
-                                     uint64_t *rest_loads_out)
+                                     uint64_t *next_offset_state)
 {
     uint64_t next_offset = 0;
     uint64_t total_loads = 0;
-    uint64_t split = 0;
     uint64_t base_addr_u64;
     uint64_t max_offset;
 
@@ -363,33 +357,14 @@ static uint64_t pointer_chase_kernel(struct pointer_chase_line *walk_array,
         next_offset = *next_offset_state;
 
     total_loads = (uint64_t)chase_iterations * (uint64_t)chase_loads_per_iter;
-    split = (split_loads < total_loads) ? split_loads : total_loads;
     base_addr_u64 = (uint64_t)(uintptr_t)walk_array;
 #if defined(__aarch64__)
     {
-        static uint64_t kernel_debug_calls = 0;
         uint64_t remaining = 0;
         uint64_t next = 0;
         uint64_t base = 0;
-        if (kernel_debug_calls < 4)
-        {
-            char dbg_data[320];
-            snprintf(dbg_data, sizeof(dbg_data),
-                     "{\"kernel_debug_call\":%llu,\"total_loads\":%llu,\"split\":%llu,\"remaining_assigned\":%llu,"
-                     "\"next_offset_in\":%llu}",
-                     (unsigned long long)kernel_debug_calls,
-                     (unsigned long long)total_loads,
-                     (unsigned long long)split,
-                     (unsigned long long)split,
-                     (unsigned long long)next_offset);
-            // #region agent log H6 split-asm counter integrity
-            debug_emit_stdout("post-fix-hang", "H6_split_counter_corruption",
-                              "stream_omp.c:pointer_chase_kernel",
-                              "Counter assignment state before split ASM", dbg_data);
-            // #endregion
-        }
         uint64_t begin_cycles = now_cycles();
-        remaining = split;
+        remaining = total_loads;
         next = next_offset;
         base = base_addr_u64;
         asm volatile(
@@ -404,85 +379,18 @@ static uint64_t pointer_chase_kernel(struct pointer_chase_line *walk_array,
             : "+r"(remaining), "+r"(next)
             : "r"(base)
             : "x3", "cc", "memory");
-        if (kernel_debug_calls < 4)
-        {
-            char dbg_data[256];
-            snprintf(dbg_data, sizeof(dbg_data),
-                     "{\"kernel_debug_call\":%llu,\"stage\":\"after_split_asm\","
-                     "\"remaining_after_split\":%llu,\"next_offset_mid\":%llu}",
-                     (unsigned long long)kernel_debug_calls,
-                     (unsigned long long)remaining,
-                     (unsigned long long)next);
-            // #region agent log H8 split stage completion
-            debug_emit_stdout("diagnose-hang", "H8_kernel_stage_progress",
-                              "stream_omp.c:pointer_chase_kernel",
-                              "Reached checkpoint after split asm loop", dbg_data);
-            // #endregion
-        }
-        if (split_cycles_out != NULL)
-            *split_cycles_out = now_cycles() - begin_cycles;
-        if (split_loads_out != NULL)
-            *split_loads_out = split;
-        begin_cycles = now_cycles();
-        remaining = total_loads - split;
-        asm volatile(
-            "cmp %0, #0\n\t"
-            "beq 4f\n\t"
-            "3:\n\t"
-            "add x3, %2, %1\n\t"
-            "ldr %1, [x3]\n\t"
-            "subs %0, %0, #1\n\t"
-            "bne 3b\n\t"
-            "4:\n\t"
-            : "+r"(remaining), "+r"(next)
-            : "r"(base)
-            : "x3", "cc", "memory");
-        if (kernel_debug_calls < 4)
-        {
-            char dbg_data[256];
-            snprintf(dbg_data, sizeof(dbg_data),
-                     "{\"kernel_debug_call\":%llu,\"stage\":\"after_rest_asm\","
-                     "\"remaining_after_rest\":%llu,\"next_offset_out\":%llu}",
-                     (unsigned long long)kernel_debug_calls,
-                     (unsigned long long)remaining,
-                     (unsigned long long)next);
-            // #region agent log H8 rest stage completion
-            debug_emit_stdout("diagnose-hang", "H8_kernel_stage_progress",
-                              "stream_omp.c:pointer_chase_kernel",
-                              "Reached checkpoint after rest asm loop", dbg_data);
-            // #endregion
-        }
-        if (rest_cycles_out != NULL)
-            *rest_cycles_out = now_cycles() - begin_cycles;
-        if (rest_loads_out != NULL)
-            *rest_loads_out = total_loads - split;
         next_offset = next;
-        kernel_debug_calls++;
+        (void)begin_cycles;
     }
 #else
     {
         uint64_t step;
         uint8_t *base_addr = (uint8_t *)walk_array;
-        uint64_t begin_cycles = now_cycles();
-        for (step = 0; step < split; step++)
+        for (step = 0; step < total_loads; step++)
         {
             volatile uint64_t *entry = (volatile uint64_t *)(base_addr + next_offset);
             next_offset = *entry;
         }
-        if (split_cycles_out != NULL)
-            *split_cycles_out = now_cycles() - begin_cycles;
-        if (split_loads_out != NULL)
-            *split_loads_out = split;
-        begin_cycles = now_cycles();
-        for (step = split; step < total_loads; step++)
-        {
-            volatile uint64_t *entry = (volatile uint64_t *)(base_addr + next_offset);
-            next_offset = *entry;
-        }
-        if (rest_cycles_out != NULL)
-            *rest_cycles_out = now_cycles() - begin_cycles;
-        if (rest_loads_out != NULL)
-            *rest_loads_out = total_loads - split;
     }
 #endif
 
@@ -690,10 +598,6 @@ int main(int argc, char *argv[])
     uint64_t pointer_chase_measure_window_cycles = 0;
     uint64_t pointer_chase_iter_window_cycles_total = 0;
     uint64_t pointer_chase_next_offset = 0;
-    uint64_t pointer_chase_split_cycles_total = 0;
-    uint64_t pointer_chase_rest_cycles_total = 0;
-    uint64_t pointer_chase_split_loads_total = 0;
-    uint64_t pointer_chase_rest_loads_total = 0;
     unsigned long long stream_measured_iterations = 0ULL;
     volatile int stream_iter_done = 0;
     int stream_iter_workers_remaining = 0;
@@ -1127,28 +1031,15 @@ int main(int argc, char *argv[])
                     while (1)
                     {
                         uint64_t chase_begin_cycles = now_cycles();
-                        uint64_t split_cycles = 0;
-                        uint64_t split_loads_local = 0;
-                        uint64_t rest_cycles = 0;
-                        uint64_t rest_loads_local = 0;
                         uint64_t chase_value = pointer_chase_kernel(chase_array,
                                                                     (uint64_t)chase_array_elems,
                                                                     chase_iterations,
                                                                     chase_loads_per_iter,
-                                                                    &pointer_chase_next_offset,
-                                                                    4096ULL,
-                                                                    &split_cycles,
-                                                                    &split_loads_local,
-                                                                    &rest_cycles,
-                                                                    &rest_loads_local);
+                                                                    &pointer_chase_next_offset);
                         uint64_t chase_end_cycles = now_cycles();
                         chase_sink ^= chase_value;
                         if (chase_end_cycles >= chase_begin_cycles)
                             pointer_chase_total_cycles += (chase_end_cycles - chase_begin_cycles);
-                        pointer_chase_split_cycles_total += split_cycles;
-                        pointer_chase_split_loads_total += split_loads_local;
-                        pointer_chase_rest_cycles_total += rest_cycles;
-                        pointer_chase_rest_loads_total += rest_loads_local;
                         pointer_chase_total_loads += (unsigned long long)chase_iterations *
                                                      (unsigned long long)chase_loads_per_iter;
                         chase_kernel_calls_this_iter++;
@@ -1272,38 +1163,29 @@ int main(int argc, char *argv[])
                 }
                 {
                     double overall_chase_duty_pct = 0.0;
-                    double split_latency_ns = 0.0;
-                    double rest_latency_ns = 0.0;
+                    double avg_chase_kernels_per_iter = 0.0;
                     if (pointer_chase_iter_window_cycles_total > 0ULL)
                         overall_chase_duty_pct =
                             ((double)pointer_chase_total_cycles * 100.0) /
                             (double)pointer_chase_iter_window_cycles_total;
-                    if (pointer_chase_split_loads_total > 0ULL)
-                        split_latency_ns =
-                            ((double)pointer_chase_split_cycles_total /
-                             (double)pointer_chase_split_loads_total) *
-                            (1.0e9 / (double)arch_timer_hz);
-                    if (pointer_chase_rest_loads_total > 0ULL)
-                        rest_latency_ns =
-                            ((double)pointer_chase_rest_cycles_total /
-                             (double)pointer_chase_rest_loads_total) *
-                            (1.0e9 / (double)arch_timer_hz);
+                    if (stream_measured_iterations > 0ULL &&
+                        chase_iterations > 0 && chase_loads_per_iter > 0)
+                        avg_chase_kernels_per_iter =
+                            ((double)pointer_chase_total_loads /
+                             ((double)chase_iterations * (double)chase_loads_per_iter)) /
+                            (double)stream_measured_iterations;
                     // #region agent log H5 aggregate duty-cycle evidence
                     {
-                        char duty_data[384];
+                        char duty_data[320];
                         snprintf(duty_data, sizeof(duty_data),
                                  "{\"overall_chase_duty_pct\":%.4f,\"iter_window_cycles_total\":%llu,"
                                  "\"total_chase_cycles\":%llu,\"measured_iters\":%llu,"
-                                 "\"split_latency_ns\":%.6f,\"rest_latency_ns\":%.6f,"
-                                 "\"split_loads_total\":%llu,\"rest_loads_total\":%llu}",
+                                 "\"avg_chase_kernels_per_iter\":%.6f}",
                                  overall_chase_duty_pct,
                                  (unsigned long long)pointer_chase_iter_window_cycles_total,
                                  (unsigned long long)pointer_chase_total_cycles,
                                  stream_measured_iterations,
-                                 split_latency_ns,
-                                 rest_latency_ns,
-                                 (unsigned long long)pointer_chase_split_loads_total,
-                                 (unsigned long long)pointer_chase_rest_loads_total);
+                                 avg_chase_kernels_per_iter);
                         debug_emit_stdout("post-fix", "H5_aggregate_chase_duty",
                                           "stream_omp.c:final_summary",
                                           "Aggregate chase duty cycle across measured window", duty_data);
