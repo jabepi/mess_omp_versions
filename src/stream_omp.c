@@ -602,7 +602,10 @@ int main(int argc, char *argv[])
     uint64_t pointer_chase_total_cycles = 0;
     unsigned long long pointer_chase_total_loads = 0ULL;
     uint64_t pointer_chase_measure_window_cycles = 0;
+    uint64_t pointer_chase_core_window_cycles = 0;
     uint64_t pointer_chase_next_offset = 0;
+    uint64_t pointer_kernel_cycles_min = ULLONG_MAX;
+    uint64_t pointer_kernel_cycles_max = 0;
     unsigned long long stream_measured_iterations = 0ULL;
     unsigned long long stream_measured_bytes = 0ULL;
     unsigned long long stream_passes_total = 0ULL;
@@ -1047,6 +1050,10 @@ int main(int argc, char *argv[])
                     pointer_chase_total_cycles += kernel_cycles;
                     pointer_chase_total_loads += (unsigned long long)chase_iterations *
                                                  (unsigned long long)chase_loads_per_iter;
+                    if (kernel_cycles < pointer_kernel_cycles_min)
+                        pointer_kernel_cycles_min = kernel_cycles;
+                    if (kernel_cycles > pointer_kernel_cycles_max)
+                        pointer_kernel_cycles_max = kernel_cycles;
                     if (iter < 2)
                     {
                         char dbg_data[256];
@@ -1062,6 +1069,7 @@ int main(int argc, char *argv[])
                         // #endregion
                     }
                 }
+                pointer_chase_core_window_cycles = now_cycles() - pointer_chase_measure_window_cycles;
                 stream_workers_stop = 1;
 #ifdef _OPENMP
                 #pragma omp flush(stream_workers_stop)
@@ -1162,6 +1170,8 @@ int main(int argc, char *argv[])
                     double avg_stream_iter_cycles = 0.0;
                     double stream_bytes_per_pass = 0.0;
                     double pointer_total_kernel_calls = 0.0;
+                    double pointer_kernel_min_ns = 0.0;
+                    double pointer_kernel_max_ns = 0.0;
                     unsigned long long a_partition_hash = 0ULL;
                     unsigned long long b_partition_hash = 0ULL;
                     unsigned long long chase_partition_hash = 0ULL;
@@ -1179,6 +1189,12 @@ int main(int argc, char *argv[])
                         pointer_total_kernel_calls =
                             (double)pointer_chase_total_loads /
                             ((double)chase_iterations * (double)chase_loads_per_iter);
+                    if (arch_timer_hz > 0ULL && pointer_kernel_cycles_min != ULLONG_MAX)
+                        pointer_kernel_min_ns =
+                            (double)pointer_kernel_cycles_min * (1.0e9 / (double)arch_timer_hz);
+                    if (arch_timer_hz > 0ULL && pointer_kernel_cycles_max > 0ULL)
+                        pointer_kernel_max_ns =
+                            (double)pointer_kernel_cycles_max * (1.0e9 / (double)arch_timer_hz);
                     if (pointer_chase_measure_window_cycles > 0ULL && arch_timer_hz > 0ULL)
                     {
                         chase_loads_per_sec =
@@ -1212,6 +1228,8 @@ int main(int argc, char *argv[])
                                  "\"chase_loads_per_sec\":%.6f,"
                                  "\"stream_passes_total\":%llu,\"stream_bytes_per_pass\":%.6f,"
                                  "\"pointer_total_kernel_calls\":%.6f,"
+                                 "\"pointer_core_window_cycles\":%llu,\"pointer_tail_window_cycles\":%llu,"
+                                 "\"pointer_kernel_min_ns\":%.6f,\"pointer_kernel_max_ns\":%.6f,"
                                  "\"avg_stream_iter_cycles\":%.6f,"
                                  "\"pointer_chase_bw_MB_s\":%.6f,\"combined_bw_MB_s\":%.6f,"
                                  "\"a_base_addr\":\"0x%" PRIxPTR "\",\"b_base_addr\":\"0x%" PRIxPTR "\","
@@ -1232,6 +1250,11 @@ int main(int argc, char *argv[])
                                  stream_passes_total,
                                  stream_bytes_per_pass,
                                  pointer_total_kernel_calls,
+                                 (unsigned long long)pointer_chase_core_window_cycles,
+                                 (unsigned long long)(pointer_chase_measure_window_cycles > pointer_chase_core_window_cycles ?
+                                                      (pointer_chase_measure_window_cycles - pointer_chase_core_window_cycles) : 0ULL),
+                                 pointer_kernel_min_ns,
+                                 pointer_kernel_max_ns,
                                  avg_stream_iter_cycles,
                                  pointer_chase_bw_mb_s,
                                  combined_bw_mb_s,
