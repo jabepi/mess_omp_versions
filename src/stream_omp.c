@@ -122,6 +122,7 @@ void m5_dump_stats(uint64_t delay, uint64_t period) {
 #endif
 
 #define STREAM_KERNEL_GRAIN_ELEMS 400
+#define STREAM_STOP_CHUNK_ELEMS (STREAM_KERNEL_GRAIN_ELEMS * 128)
 #define POINTER_CHASE_CACHE_LINE 128
 #define POINTER_CHASE_DEFAULT_BYTES (100ULL * 1024ULL * 1024ULL)
 
@@ -1077,17 +1078,33 @@ int main(int argc, char *argv[])
             }
             else if (local_elements > 0)
             {
+                ssize_t stream_offset = 0;
                 while (1)
                 {
-                    unsigned long long bytes_this_pass = (unsigned long long)local_elements *
-                                                         (unsigned long long)sizeof(STREAM_TYPE) *
-                                                         2ULL;
+                    ssize_t chunk_elems = local_elements - stream_offset;
+                    unsigned long long bytes_this_pass = 0ULL;
+                    if (chunk_elems > (ssize_t)STREAM_STOP_CHUNK_ELEMS)
+                        chunk_elems = (ssize_t)STREAM_STOP_CHUNK_ELEMS;
+                    if (chunk_elems <= 0)
+                    {
+                        stream_offset = 0;
+                        chunk_elems = local_elements;
+                        if (chunk_elems > (ssize_t)STREAM_STOP_CHUNK_ELEMS)
+                            chunk_elems = (ssize_t)STREAM_STOP_CHUNK_ELEMS;
+                    }
+                    bytes_this_pass = (unsigned long long)chunk_elems *
+                                      (unsigned long long)sizeof(STREAM_TYPE) * 2ULL;
 #ifdef _OPENMP
                     #pragma omp flush(stream_workers_stop)
 #endif
                     if (stream_workers_stop)
                         break;
-                    STREAM_copy_rw(a + local_start, b + local_start, &local_elements, &pause);
+                    STREAM_copy_rw(a + local_start + stream_offset,
+                                   b + local_start + stream_offset,
+                                   &chunk_elems, &pause);
+                    stream_offset += chunk_elems;
+                    if (stream_offset >= local_elements)
+                        stream_offset = 0;
 #ifdef _OPENMP
                     #pragma omp atomic
 #endif
@@ -1228,6 +1245,7 @@ int main(int argc, char *argv[])
                                  "\"chase_loads_per_sec\":%.6f,"
                                  "\"stream_passes_total\":%llu,\"stream_bytes_per_pass\":%.6f,"
                                  "\"pointer_total_kernel_calls\":%.6f,"
+                                 "\"stream_chunk_elems\":%d,"
                                  "\"pointer_core_window_cycles\":%llu,\"pointer_tail_window_cycles\":%llu,"
                                  "\"pointer_kernel_min_ns\":%.6f,\"pointer_kernel_max_ns\":%.6f,"
                                  "\"avg_stream_iter_cycles\":%.6f,"
@@ -1236,7 +1254,7 @@ int main(int argc, char *argv[])
                                  "\"chase_base_addr\":\"0x%" PRIxPTR "\","
                                  "\"a_partition_hash\":%llu,\"b_partition_hash\":%llu,"
                                  "\"chase_partition_hash\":%llu,"
-                                 "\"build_marker\":\"dbg_h15_stream_then_pointer\"}",
+                                 "\"build_marker\":\"dbg_h16_chunked_stream_stop\"}",
                                  overall_chase_duty_pct,
                                  (unsigned long long)pointer_chase_measure_window_cycles,
                                  (unsigned long long)pointer_chase_total_cycles,
@@ -1250,6 +1268,7 @@ int main(int argc, char *argv[])
                                  stream_passes_total,
                                  stream_bytes_per_pass,
                                  pointer_total_kernel_calls,
+                                 STREAM_STOP_CHUNK_ELEMS,
                                  (unsigned long long)pointer_chase_core_window_cycles,
                                  (unsigned long long)(pointer_chase_measure_window_cycles > pointer_chase_core_window_cycles ?
                                                       (pointer_chase_measure_window_cycles - pointer_chase_core_window_cycles) : 0ULL),
