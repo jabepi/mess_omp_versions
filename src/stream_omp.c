@@ -21,6 +21,29 @@ static long long debug_now_ms(void)
     gettimeofday(&tv, NULL);
     return ((long long)tv.tv_sec * 1000LL) + ((long long)tv.tv_usec / 1000LL);
 }
+static uint64_t debug_now_ms_u64(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return ((uint64_t)ts.tv_sec * 1000ULL) + (uint64_t)(ts.tv_nsec / 1000000ULL);
+}
+static void debug_emit_stdout(const char *run_id,
+                              const char *hypothesis_id,
+                              const char *location,
+                              const char *message,
+                              const char *data_json)
+{
+    fprintf(stdout,
+            "{\"sessionId\":\"71e020\",\"runId\":\"%s\",\"hypothesisId\":\"%s\","
+            "\"location\":\"%s\",\"message\":\"%s\",\"data\":%s,\"timestamp\":%llu}\n",
+            run_id,
+            hypothesis_id,
+            location,
+            message,
+            data_json ? data_json : "{}",
+            (unsigned long long)debug_now_ms_u64());
+    fflush(stdout);
+}
 static void debug_log_json(const char *message)
 {
     fprintf(stdout, "{\"message\":\"%s\",\"timestamp\":%lld}\n", message, debug_now_ms());
@@ -933,6 +956,25 @@ int main(int argc, char *argv[])
             if (effective_warmup_iters < 0)
                 effective_warmup_iters = 0;
         }
+        if (thread_id == 0)
+        {
+            char dbg_data[320];
+            snprintf(dbg_data, sizeof(dbg_data),
+                     "{\"run_iterations\":%d,\"requested_warmup\":%d,\"effective_warmup\":%d,"
+                     "\"measured_iters\":%d,\"thread_count\":%d,\"stream_worker_count\":%d,"
+                     "\"thread0_pointer_chase\":%d}",
+                     run_iterations,
+                     warmup_iterations,
+                     effective_warmup_iters,
+                     measured_iters,
+                     thread_count,
+                     stream_worker_count,
+                     thread0_pointer_chase);
+            // #region agent log H1/H4 window sizing and overlap config
+            debug_emit_stdout("pre-fix", "H1_window_or_clip", "stream_omp.c:measurement_setup",
+                              "Computed measurement window and worker topology", dbg_data);
+            // #endregion
+        }
 
 #ifdef _OPENMP
         #pragma omp barrier
@@ -971,6 +1013,9 @@ int main(int argc, char *argv[])
 
             for (iter = 0; iter < measured_iters; iter++)
             {
+                uint64_t iter_chase_cycles_before = pointer_chase_total_cycles;
+                unsigned long long iter_chase_loads_before = pointer_chase_total_loads;
+                uint64_t chase_kernel_calls_this_iter = 0;
 #ifdef _OPENMP
                 #pragma omp single
 #endif
@@ -998,6 +1043,7 @@ int main(int argc, char *argv[])
                             pointer_chase_total_cycles += (chase_end_cycles - chase_begin_cycles);
                         pointer_chase_total_loads += (unsigned long long)chase_iterations *
                                                      (unsigned long long)chase_loads_per_iter;
+                        chase_kernel_calls_this_iter++;
 #ifdef _OPENMP
                         #pragma omp flush(stream_iter_done)
 #endif
@@ -1027,6 +1073,29 @@ int main(int argc, char *argv[])
 #ifdef _OPENMP
                 #pragma omp barrier
 #endif
+                if (thread_id == 0)
+                {
+                    char dbg_data[384];
+                    unsigned long long iter_loads =
+                        pointer_chase_total_loads - iter_chase_loads_before;
+                    uint64_t iter_cycles =
+                        pointer_chase_total_cycles - iter_chase_cycles_before;
+                    snprintf(dbg_data, sizeof(dbg_data),
+                             "{\"iter\":%d,\"chase_kernel_calls\":%llu,\"iter_loads\":%llu,"
+                             "\"iter_cycles\":%llu,\"stream_iter_done\":%d,"
+                             "\"stream_workers_remaining\":%d}",
+                             iter,
+                             (unsigned long long)chase_kernel_calls_this_iter,
+                             iter_loads,
+                             (unsigned long long)iter_cycles,
+                             stream_iter_done,
+                             stream_iter_workers_remaining);
+                    // #region agent log H2 per-iteration chase work
+                    debug_emit_stdout("pre-fix", "H2_chase_work_varies_by_bw",
+                                      "stream_omp.c:measurement_iter",
+                                      "Per-iteration pointer-chase work and cycles", dbg_data);
+                    // #endregion
+                }
             }
 
             if (thread_id == 0)
@@ -1103,6 +1172,25 @@ int main(int argc, char *argv[])
                          stream_measured_iterations,
                          (unsigned long long)arch_timer_hz);
                 debug_log_json(ptr_dbg_msg);
+                {
+                    char dbg_data[384];
+                    snprintf(dbg_data, sizeof(dbg_data),
+                             "{\"total_cycles\":%llu,\"total_loads\":%llu,\"avg_latency_ns\":%.6f,"
+                             "\"avg_latency_cycles\":%.6f,\"measured_bw_MB_s\":%.6f,"
+                             "\"measured_iters\":%llu,\"timer_hz\":%llu}",
+                             (unsigned long long)pointer_chase_total_cycles,
+                             pointer_chase_total_loads,
+                             latency_sim_ns,
+                             latency_cycles,
+                             measured_bw_mb_s,
+                             stream_measured_iterations,
+                             (unsigned long long)arch_timer_hz);
+                    // #region agent log H3 summary correlation evidence
+                    debug_emit_stdout("pre-fix", "H3_summary_bw_latency_correlation",
+                                      "stream_omp.c:final_summary",
+                                      "Final measured BW and latency summary", dbg_data);
+                    // #endregion
+                }
                 if (stream_worker_count > 0)
                     printf("%.6f %.6f\n", measured_bw_mb_s, latency_sim_ns);
             }
