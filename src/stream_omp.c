@@ -593,8 +593,6 @@ int main(int argc, char *argv[])
     uint64_t pointer_chase_measure_window_cycles = 0;
     uint64_t pointer_chase_next_offset = 0;
     unsigned long long stream_measured_iterations = 0ULL;
-    volatile int stream_iter_done = 0;
-    int stream_iter_workers_remaining = 0;
     uint64_t arch_timer_hz = cycles_per_second();
 
     if (debug_enabled)
@@ -607,6 +605,14 @@ int main(int argc, char *argv[])
                 chase_array_elems, chase_iterations, chase_loads_per_iter, walk_file_path, thread0_pointer_chase, warmup_iterations);
             debug_log_json(dbg_msg);
         }
+
+    if (thread0_pointer_chase && warmup_iterations >= run_iterations)
+    {
+        printf("ERROR: with -t 1, warmup iterations (-u=%d) must be smaller than total iterations (-n=%d).\n",
+               warmup_iterations, run_iterations);
+        printf("Please choose values such that measured iterations are explicit and stable (example: -n 30 -u 10).\n");
+        exit(-1);
+    }
    
     
     // Assigning the right asm function based on the RD ratio
@@ -949,13 +955,6 @@ int main(int argc, char *argv[])
         if (effective_warmup_iters < 0)
             effective_warmup_iters = 0;
         measured_iters = run_iterations - effective_warmup_iters;
-        if (thread0_pointer_chase && run_iterations >= 3 && measured_iters < 3)
-        {
-            measured_iters = 3;
-            effective_warmup_iters = run_iterations - measured_iters;
-            if (effective_warmup_iters < 0)
-                effective_warmup_iters = 0;
-        }
         if (thread_id == 0)
         {
             char dbg_data[320];
@@ -971,7 +970,7 @@ int main(int argc, char *argv[])
                      stream_worker_count,
                      thread0_pointer_chase);
             // #region agent log H1/H4 window sizing and overlap config
-            debug_emit_stdout("pre-fix", "H1_window_or_clip", "stream_omp.c:measurement_setup",
+            debug_emit_stdout("post-fix", "H1_window_or_clip", "stream_omp.c:measurement_setup",
                               "Computed measurement window and worker topology", dbg_data);
             // #endregion
         }
@@ -1008,6 +1007,9 @@ int main(int argc, char *argv[])
             }
             stream_measured_iterations = (unsigned long long)measured_iters;
 
+#ifdef _OPENMP
+            #pragma omp barrier
+#endif
             if (thread_id == 0)
                 pointer_chase_measure_window_cycles = now_cycles();
 
@@ -1016,59 +1018,28 @@ int main(int argc, char *argv[])
                 uint64_t iter_chase_cycles_before = pointer_chase_total_cycles;
                 unsigned long long iter_chase_loads_before = pointer_chase_total_loads;
                 uint64_t chase_kernel_calls_this_iter = 0;
-#ifdef _OPENMP
-                #pragma omp single
-#endif
-                {
-                    stream_iter_workers_remaining = stream_worker_count;
-                    stream_iter_done = (stream_worker_count == 0) ? 1 : 0;
-                }
-#ifdef _OPENMP
-                #pragma omp barrier
-#endif
 
                 if (thread_id == 0)
                 {
-                    while (1)
-                    {
-                        uint64_t chase_begin_cycles = now_cycles();
-                        uint64_t chase_value = pointer_chase_kernel(chase_array,
-                                                                    (uint64_t)chase_array_elems,
-                                                                    chase_iterations,
-                                                                    chase_loads_per_iter,
-                                                                    &pointer_chase_next_offset);
-                        uint64_t chase_end_cycles = now_cycles();
-                        chase_sink ^= chase_value;
-                        if (chase_end_cycles >= chase_begin_cycles)
-                            pointer_chase_total_cycles += (chase_end_cycles - chase_begin_cycles);
-                        pointer_chase_total_loads += (unsigned long long)chase_iterations *
-                                                     (unsigned long long)chase_loads_per_iter;
-                        chase_kernel_calls_this_iter++;
-#ifdef _OPENMP
-                        #pragma omp flush(stream_iter_done)
-#endif
-                        if (stream_iter_done)
-                            break;
-                    }
+                    uint64_t chase_begin_cycles = now_cycles();
+                    uint64_t chase_value = pointer_chase_kernel(chase_array,
+                                                                (uint64_t)chase_array_elems,
+                                                                chase_iterations,
+                                                                chase_loads_per_iter,
+                                                                &pointer_chase_next_offset);
+                    uint64_t chase_end_cycles = now_cycles();
+                    chase_sink ^= chase_value;
+                    if (chase_end_cycles >= chase_begin_cycles)
+                        pointer_chase_total_cycles += (chase_end_cycles - chase_begin_cycles);
+                    pointer_chase_total_loads += (unsigned long long)chase_iterations *
+                                                 (unsigned long long)chase_loads_per_iter;
+                    chase_kernel_calls_this_iter = 1;
                 }
                 else if (local_elements > 0)
                 {
                     if (debug_enabled && iter == 0 && thread_id < 2)
                         debug_log_json("Thread entering synchronized STREAM/pointer-chase measurement loop");
                     STREAM_copy_rw(a + local_start, b + local_start, &local_elements, &pause);
-#ifdef _OPENMP
-                    if (stream_worker_count > 0)
-                    {
-                        int remaining_after = 0;
-                        #pragma omp atomic capture
-                        remaining_after = --stream_iter_workers_remaining;
-                        if (remaining_after == 0)
-                        {
-                            stream_iter_done = 1;
-                            #pragma omp flush(stream_iter_done)
-                        }
-                    }
-#endif
                 }
 #ifdef _OPENMP
                 #pragma omp barrier
@@ -1082,16 +1053,15 @@ int main(int argc, char *argv[])
                         pointer_chase_total_cycles - iter_chase_cycles_before;
                     snprintf(dbg_data, sizeof(dbg_data),
                              "{\"iter\":%d,\"chase_kernel_calls\":%llu,\"iter_loads\":%llu,"
-                             "\"iter_cycles\":%llu,\"stream_iter_done\":%d,"
-                             "\"stream_workers_remaining\":%d}",
+                             "\"iter_cycles\":%llu,\"expected_iter_loads\":%llu}",
                              iter,
                              (unsigned long long)chase_kernel_calls_this_iter,
                              iter_loads,
                              (unsigned long long)iter_cycles,
-                             stream_iter_done,
-                             stream_iter_workers_remaining);
+                             (unsigned long long)chase_iterations *
+                             (unsigned long long)chase_loads_per_iter);
                     // #region agent log H2 per-iteration chase work
-                    debug_emit_stdout("pre-fix", "H2_chase_work_varies_by_bw",
+                    debug_emit_stdout("post-fix", "H2_chase_work_varies_by_bw",
                                       "stream_omp.c:measurement_iter",
                                       "Per-iteration pointer-chase work and cycles", dbg_data);
                     // #endregion
@@ -1186,7 +1156,7 @@ int main(int argc, char *argv[])
                              stream_measured_iterations,
                              (unsigned long long)arch_timer_hz);
                     // #region agent log H3 summary correlation evidence
-                    debug_emit_stdout("pre-fix", "H3_summary_bw_latency_correlation",
+                    debug_emit_stdout("post-fix", "H3_summary_bw_latency_correlation",
                                       "stream_omp.c:final_summary",
                                       "Final measured BW and latency summary", dbg_data);
                     // #endregion
