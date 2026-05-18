@@ -12,6 +12,7 @@
 # include <stdint.h>
 # include <errno.h>
 # include <time.h>
+# include <inttypes.h>
 # include <omp.h>
 # include "utils.h"
 
@@ -606,6 +607,9 @@ int main(int argc, char *argv[])
     unsigned long long stream_measured_iterations = 0ULL;
     int observed_thread_count = 1;
     int observed_stream_worker_count = 0;
+    uintptr_t a_base_addr = 0;
+    uintptr_t b_base_addr = 0;
+    uintptr_t chase_base_addr = 0;
     volatile int stream_iter_done = 0;
     int stream_iter_workers_remaining = 0;
     uint64_t arch_timer_hz = cycles_per_second();
@@ -824,6 +828,9 @@ int main(int argc, char *argv[])
         exit(1);
     }
     init_pointer_walk(walk_file_path, chase_array, (uint64_t)chase_array_elems);
+    a_base_addr = (uintptr_t)a;
+    b_base_addr = (uintptr_t)b;
+    chase_base_addr = (uintptr_t)chase_array;
 
     // Initial informational printouts -- rank 0 handles all the output
     if (debug_enabled)
@@ -1182,6 +1189,9 @@ int main(int argc, char *argv[])
                     double chase_loads_per_sec = 0.0;
                     double pointer_chase_bw_mb_s = 0.0;
                     double combined_bw_mb_s = 0.0;
+                    unsigned long long a_partition_hash = 0ULL;
+                    unsigned long long b_partition_hash = 0ULL;
+                    unsigned long long chase_partition_hash = 0ULL;
                     if (pointer_chase_iter_window_cycles_total > 0ULL)
                         overall_chase_duty_pct =
                             ((double)pointer_chase_total_cycles * 100.0) /
@@ -1203,16 +1213,23 @@ int main(int argc, char *argv[])
                             1.0e6;
                     }
                     combined_bw_mb_s = measured_bw_mb_s + pointer_chase_bw_mb_s;
+                    a_partition_hash = (unsigned long long)((a_base_addr >> 12) & 0x3ffULL);
+                    b_partition_hash = (unsigned long long)((b_base_addr >> 12) & 0x3ffULL);
+                    chase_partition_hash = (unsigned long long)((chase_base_addr >> 12) & 0x3ffULL);
                     // #region agent log H5 aggregate duty-cycle evidence
                     {
-                        char duty_data[640];
+                        char duty_data[1024];
                         snprintf(duty_data, sizeof(duty_data),
                                  "{\"overall_chase_duty_pct\":%.4f,\"iter_window_cycles_total\":%llu,"
                                  "\"total_chase_cycles\":%llu,\"measured_iters\":%llu,"
                                  "\"avg_chase_kernels_per_iter\":%.6f,"
                                  "\"thread_count\":%d,\"stream_worker_count\":%d,"
                                  "\"chase_loads_per_sec\":%.6f,"
-                                 "\"pointer_chase_bw_MB_s\":%.6f,\"combined_bw_MB_s\":%.6f}",
+                                 "\"pointer_chase_bw_MB_s\":%.6f,\"combined_bw_MB_s\":%.6f,"
+                                 "\"a_base_addr\":\"0x%" PRIxPTR "\",\"b_base_addr\":\"0x%" PRIxPTR "\","
+                                 "\"chase_base_addr\":\"0x%" PRIxPTR "\","
+                                 "\"a_partition_hash\":%llu,\"b_partition_hash\":%llu,"
+                                 "\"chase_partition_hash\":%llu}",
                                  overall_chase_duty_pct,
                                  (unsigned long long)pointer_chase_iter_window_cycles_total,
                                  (unsigned long long)pointer_chase_total_cycles,
@@ -1222,7 +1239,13 @@ int main(int argc, char *argv[])
                                  observed_stream_worker_count,
                                  chase_loads_per_sec,
                                  pointer_chase_bw_mb_s,
-                                 combined_bw_mb_s);
+                                 combined_bw_mb_s,
+                                 a_base_addr,
+                                 b_base_addr,
+                                 chase_base_addr,
+                                 a_partition_hash,
+                                 b_partition_hash,
+                                 chase_partition_hash);
                         debug_emit_stdout("post-fix", "H5_aggregate_chase_duty",
                                           "stream_omp.c:final_summary",
                                           "Aggregate chase duty cycle across measured window", duty_data);
