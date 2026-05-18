@@ -368,31 +368,30 @@ static uint64_t pointer_chase_kernel(struct pointer_chase_line *walk_array,
 #if defined(__aarch64__)
     {
         static uint64_t kernel_debug_calls = 0;
-        register uint64_t remaining asm("x0") = split;
-        register uint64_t next asm("x2") = next_offset;
-        register uint64_t base asm("x1") = base_addr_u64;
-        uint64_t remaining_before_timer = remaining;
-        uint64_t begin_cycles = now_cycles();
-        uint64_t remaining_after_timer = remaining;
         if (kernel_debug_calls < 4)
         {
             char dbg_data[320];
             snprintf(dbg_data, sizeof(dbg_data),
-                     "{\"kernel_debug_call\":%llu,\"total_loads\":%llu,\"split\":%llu,"
-                     "\"remaining_before_timer\":%llu,\"remaining_after_timer\":%llu,"
+                     "{\"kernel_debug_call\":%llu,\"total_loads\":%llu,\"split\":%llu,\"remaining_assigned\":%llu,"
                      "\"next_offset_in\":%llu}",
                      (unsigned long long)kernel_debug_calls,
                      (unsigned long long)total_loads,
                      (unsigned long long)split,
-                     (unsigned long long)remaining_before_timer,
-                     (unsigned long long)remaining_after_timer,
+                     (unsigned long long)remaining,
                      (unsigned long long)next_offset);
             // #region agent log H6 split-asm counter integrity
-            debug_emit_stdout("diagnose-hang", "H6_split_counter_corruption",
+            debug_emit_stdout("post-fix-hang", "H6_split_counter_corruption",
                               "stream_omp.c:pointer_chase_kernel",
-                              "Counter state around timer read before split ASM", dbg_data);
+                              "Counter assignment state before split ASM", dbg_data);
             // #endregion
         }
+        uint64_t begin_cycles = now_cycles();
+        register uint64_t remaining asm("x0");
+        register uint64_t next asm("x2");
+        register uint64_t base asm("x1");
+        remaining = split;
+        next = next_offset;
+        base = base_addr_u64;
         asm volatile(
             "cmp %0, #0\n\t"
             "beq 2f\n\t"
@@ -409,8 +408,8 @@ static uint64_t pointer_chase_kernel(struct pointer_chase_line *walk_array,
             *split_cycles_out = now_cycles() - begin_cycles;
         if (split_loads_out != NULL)
             *split_loads_out = split;
-        remaining = total_loads - split;
         begin_cycles = now_cycles();
+        remaining = total_loads - split;
         asm volatile(
             "cmp %0, #0\n\t"
             "beq 4f\n\t"
