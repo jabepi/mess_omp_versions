@@ -341,10 +341,16 @@ static uint64_t pointer_chase_kernel(struct pointer_chase_line *walk_array,
                                      uint64_t elems,
                                      int chase_iterations,
                                      int chase_loads_per_iter,
-                                     uint64_t *next_offset_state)
+                                     uint64_t *next_offset_state,
+                                     uint64_t split_loads,
+                                     uint64_t *split_cycles_out,
+                                     uint64_t *split_loads_out,
+                                     uint64_t *rest_cycles_out,
+                                     uint64_t *rest_loads_out)
 {
     uint64_t next_offset = 0;
     uint64_t total_loads = 0;
+    uint64_t split = 0;
     uint64_t base_addr_u64;
     uint64_t max_offset;
 
@@ -357,12 +363,14 @@ static uint64_t pointer_chase_kernel(struct pointer_chase_line *walk_array,
         next_offset = *next_offset_state;
 
     total_loads = (uint64_t)chase_iterations * (uint64_t)chase_loads_per_iter;
+    split = (split_loads < total_loads) ? split_loads : total_loads;
     base_addr_u64 = (uint64_t)(uintptr_t)walk_array;
 #if defined(__aarch64__)
     {
-        register uint64_t remaining asm("x0") = total_loads;
+        register uint64_t remaining asm("x0") = split;
         register uint64_t next asm("x2") = next_offset;
         register uint64_t base asm("x1") = base_addr_u64;
+        uint64_t begin_cycles = now_cycles();
         asm volatile(
             "cmp %0, #0\n\t"
             "beq 2f\n\t"
@@ -375,17 +383,54 @@ static uint64_t pointer_chase_kernel(struct pointer_chase_line *walk_array,
             : "+r"(remaining), "+r"(next)
             : "r"(base)
             : "x3", "cc", "memory");
+        if (split_cycles_out != NULL)
+            *split_cycles_out = now_cycles() - begin_cycles;
+        if (split_loads_out != NULL)
+            *split_loads_out = split;
+        remaining = total_loads - split;
+        begin_cycles = now_cycles();
+        asm volatile(
+            "cmp %0, #0\n\t"
+            "beq 4f\n\t"
+            "3:\n\t"
+            "add x3, %2, %1\n\t"
+            "ldr %1, [x3]\n\t"
+            "subs %0, %0, #1\n\t"
+            "bne 3b\n\t"
+            "4:\n\t"
+            : "+r"(remaining), "+r"(next)
+            : "r"(base)
+            : "x3", "cc", "memory");
+        if (rest_cycles_out != NULL)
+            *rest_cycles_out = now_cycles() - begin_cycles;
+        if (rest_loads_out != NULL)
+            *rest_loads_out = total_loads - split;
         next_offset = next;
     }
 #else
     {
         uint64_t step;
         uint8_t *base_addr = (uint8_t *)walk_array;
-        for (step = 0; step < total_loads; step++)
+        uint64_t begin_cycles = now_cycles();
+        for (step = 0; step < split; step++)
         {
             volatile uint64_t *entry = (volatile uint64_t *)(base_addr + next_offset);
             next_offset = *entry;
         }
+        if (split_cycles_out != NULL)
+            *split_cycles_out = now_cycles() - begin_cycles;
+        if (split_loads_out != NULL)
+            *split_loads_out = split;
+        begin_cycles = now_cycles();
+        for (step = split; step < total_loads; step++)
+        {
+            volatile uint64_t *entry = (volatile uint64_t *)(base_addr + next_offset);
+            next_offset = *entry;
+        }
+        if (rest_cycles_out != NULL)
+            *rest_cycles_out = now_cycles() - begin_cycles;
+        if (rest_loads_out != NULL)
+            *rest_loads_out = total_loads - split;
     }
 #endif
 
@@ -593,6 +638,10 @@ int main(int argc, char *argv[])
     uint64_t pointer_chase_measure_window_cycles = 0;
     uint64_t pointer_chase_iter_window_cycles_total = 0;
     uint64_t pointer_chase_next_offset = 0;
+    uint64_t pointer_chase_split_cycles_total = 0;
+    uint64_t pointer_chase_rest_cycles_total = 0;
+    uint64_t pointer_chase_split_loads_total = 0;
+    uint64_t pointer_chase_rest_loads_total = 0;
     unsigned long long stream_measured_iterations = 0ULL;
     uint64_t arch_timer_hz = cycles_per_second();
 
@@ -1011,15 +1060,28 @@ int main(int argc, char *argv[])
                 if (thread_id == 0)
                 {
                     uint64_t chase_begin_cycles = now_cycles();
+                    uint64_t split_cycles = 0;
+                    uint64_t split_loads_local = 0;
+                    uint64_t rest_cycles = 0;
+                    uint64_t rest_loads_local = 0;
                     uint64_t chase_value = pointer_chase_kernel(chase_array,
                                                                 (uint64_t)chase_array_elems,
                                                                 chase_iterations,
                                                                 chase_loads_per_iter,
-                                                                &pointer_chase_next_offset);
+                                                                &pointer_chase_next_offset,
+                                                                4096ULL,
+                                                                &split_cycles,
+                                                                &split_loads_local,
+                                                                &rest_cycles,
+                                                                &rest_loads_local);
                     uint64_t chase_end_cycles = now_cycles();
                     chase_sink ^= chase_value;
                     if (chase_end_cycles >= chase_begin_cycles)
                         pointer_chase_total_cycles += (chase_end_cycles - chase_begin_cycles);
+                    pointer_chase_split_cycles_total += split_cycles;
+                    pointer_chase_split_loads_total += split_loads_local;
+                    pointer_chase_rest_cycles_total += rest_cycles;
+                    pointer_chase_rest_loads_total += rest_loads_local;
                     pointer_chase_total_loads += (unsigned long long)chase_iterations *
                                                  (unsigned long long)chase_loads_per_iter;
                     chase_kernel_calls_this_iter = 1;
@@ -1110,20 +1172,38 @@ int main(int argc, char *argv[])
                 }
                 {
                     double overall_chase_duty_pct = 0.0;
+                    double split_latency_ns = 0.0;
+                    double rest_latency_ns = 0.0;
                     if (pointer_chase_iter_window_cycles_total > 0ULL)
                         overall_chase_duty_pct =
                             ((double)pointer_chase_total_cycles * 100.0) /
                             (double)pointer_chase_iter_window_cycles_total;
+                    if (pointer_chase_split_loads_total > 0ULL)
+                        split_latency_ns =
+                            ((double)pointer_chase_split_cycles_total /
+                             (double)pointer_chase_split_loads_total) *
+                            (1.0e9 / (double)arch_timer_hz);
+                    if (pointer_chase_rest_loads_total > 0ULL)
+                        rest_latency_ns =
+                            ((double)pointer_chase_rest_cycles_total /
+                             (double)pointer_chase_rest_loads_total) *
+                            (1.0e9 / (double)arch_timer_hz);
                     // #region agent log H5 aggregate duty-cycle evidence
                     {
-                        char duty_data[256];
+                        char duty_data[384];
                         snprintf(duty_data, sizeof(duty_data),
                                  "{\"overall_chase_duty_pct\":%.4f,\"iter_window_cycles_total\":%llu,"
-                                 "\"total_chase_cycles\":%llu,\"measured_iters\":%llu}",
+                                 "\"total_chase_cycles\":%llu,\"measured_iters\":%llu,"
+                                 "\"split_latency_ns\":%.6f,\"rest_latency_ns\":%.6f,"
+                                 "\"split_loads_total\":%llu,\"rest_loads_total\":%llu}",
                                  overall_chase_duty_pct,
                                  (unsigned long long)pointer_chase_iter_window_cycles_total,
                                  (unsigned long long)pointer_chase_total_cycles,
-                                 stream_measured_iterations);
+                                 stream_measured_iterations,
+                                 split_latency_ns,
+                                 rest_latency_ns,
+                                 (unsigned long long)pointer_chase_split_loads_total,
+                                 (unsigned long long)pointer_chase_rest_loads_total);
                         debug_emit_stdout("post-fix", "H5_aggregate_chase_duty",
                                           "stream_omp.c:final_summary",
                                           "Aggregate chase duty cycle across measured window", duty_data);
