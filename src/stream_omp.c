@@ -341,7 +341,8 @@ static uint64_t pointer_chase_kernel(struct pointer_chase_line *walk_array,
                                      uint64_t elems,
                                      int chase_iterations,
                                      int chase_loads_per_iter,
-                                     uint64_t *next_offset_state)
+                                     uint64_t *next_offset_state,
+                                     uint64_t *kernel_cycles_out)
 {
     uint64_t next_offset = 0;
     uint64_t total_loads = 0;
@@ -380,17 +381,21 @@ static uint64_t pointer_chase_kernel(struct pointer_chase_line *walk_array,
             : "r"(base)
             : "x3", "cc", "memory");
         next_offset = next;
-        (void)begin_cycles;
+        if (kernel_cycles_out != NULL)
+            *kernel_cycles_out += (now_cycles() - begin_cycles);
     }
 #else
     {
         uint64_t step;
         uint8_t *base_addr = (uint8_t *)walk_array;
+        uint64_t begin_cycles = now_cycles();
         for (step = 0; step < total_loads; step++)
         {
             volatile uint64_t *entry = (volatile uint64_t *)(base_addr + next_offset);
             next_offset = *entry;
         }
+        if (kernel_cycles_out != NULL)
+            *kernel_cycles_out += (now_cycles() - begin_cycles);
     }
 #endif
 
@@ -1056,15 +1061,16 @@ int main(int argc, char *argv[])
                     while (1)
                     {
                         uint64_t chase_begin_cycles = now_cycles();
+                        uint64_t kernel_cycles = 0;
                         uint64_t chase_value = pointer_chase_kernel(chase_array,
                                                                     (uint64_t)chase_array_elems,
                                                                     chase_iterations,
                                                                     chase_loads_per_iter,
-                                                                    &pointer_chase_next_offset);
+                                                                    &pointer_chase_next_offset,
+                                                                    &kernel_cycles);
                         uint64_t chase_end_cycles = now_cycles();
                         chase_sink ^= chase_value;
-                        if (chase_end_cycles >= chase_begin_cycles)
-                            pointer_chase_total_cycles += (chase_end_cycles - chase_begin_cycles);
+                        pointer_chase_total_cycles += kernel_cycles;
                         pointer_chase_total_loads += (unsigned long long)chase_iterations *
                                                      (unsigned long long)chase_loads_per_iter;
                         chase_kernel_calls_this_iter++;
@@ -1073,6 +1079,8 @@ int main(int argc, char *argv[])
 #endif
                         if (stream_iter_done)
                             break;
+                        (void)chase_begin_cycles;
+                        (void)chase_end_cycles;
                     }
                 }
                 else if (local_elements > 0)
