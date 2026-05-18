@@ -367,10 +367,32 @@ static uint64_t pointer_chase_kernel(struct pointer_chase_line *walk_array,
     base_addr_u64 = (uint64_t)(uintptr_t)walk_array;
 #if defined(__aarch64__)
     {
+        static uint64_t kernel_debug_calls = 0;
         register uint64_t remaining asm("x0") = split;
         register uint64_t next asm("x2") = next_offset;
         register uint64_t base asm("x1") = base_addr_u64;
+        uint64_t remaining_before_timer = remaining;
         uint64_t begin_cycles = now_cycles();
+        uint64_t remaining_after_timer = remaining;
+        if (kernel_debug_calls < 4)
+        {
+            char dbg_data[320];
+            snprintf(dbg_data, sizeof(dbg_data),
+                     "{\"kernel_debug_call\":%llu,\"total_loads\":%llu,\"split\":%llu,"
+                     "\"remaining_before_timer\":%llu,\"remaining_after_timer\":%llu,"
+                     "\"next_offset_in\":%llu}",
+                     (unsigned long long)kernel_debug_calls,
+                     (unsigned long long)total_loads,
+                     (unsigned long long)split,
+                     (unsigned long long)remaining_before_timer,
+                     (unsigned long long)remaining_after_timer,
+                     (unsigned long long)next_offset);
+            // #region agent log H6 split-asm counter integrity
+            debug_emit_stdout("diagnose-hang", "H6_split_counter_corruption",
+                              "stream_omp.c:pointer_chase_kernel",
+                              "Counter state around timer read before split ASM", dbg_data);
+            // #endregion
+        }
         asm volatile(
             "cmp %0, #0\n\t"
             "beq 2f\n\t"
@@ -406,6 +428,7 @@ static uint64_t pointer_chase_kernel(struct pointer_chase_line *walk_array,
         if (rest_loads_out != NULL)
             *rest_loads_out = total_loads - split;
         next_offset = next;
+        kernel_debug_calls++;
     }
 #else
     {
@@ -1056,6 +1079,23 @@ int main(int argc, char *argv[])
 
                 if (thread_id == 0)
                     iter_window_begin_cycles = now_cycles();
+
+                if (thread_id == 0)
+                {
+                    if (iter < 4)
+                    {
+                        char dbg_data[192];
+                        snprintf(dbg_data, sizeof(dbg_data),
+                                 "{\"iter\":%d,\"measured_iters\":%d,\"chase_iterations\":%d,"
+                                 "\"chase_loads_per_iter\":%d}",
+                                 iter, measured_iters, chase_iterations, chase_loads_per_iter);
+                        // #region agent log H7 measured-loop heartbeat
+                        debug_emit_stdout("diagnose-hang", "H7_loop_progress",
+                                          "stream_omp.c:measurement_iter",
+                                          "Thread0 entering measured iteration", dbg_data);
+                        // #endregion
+                    }
+                }
 
                 if (thread_id == 0)
                 {
