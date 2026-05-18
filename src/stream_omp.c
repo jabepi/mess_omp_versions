@@ -1223,6 +1223,7 @@ int main(int argc, char *argv[])
                                  "{\"overall_chase_duty_pct\":%.4f,\"iter_window_cycles_total\":%llu,"
                                  "\"total_chase_cycles\":%llu,\"measured_iters\":%llu,"
                                  "\"avg_chase_kernels_per_iter\":%.6f,"
+                                 "\"rd_ratio\":%d,\"pause\":%d,"
                                  "\"thread_count\":%d,\"stream_worker_count\":%d,"
                                  "\"chase_loads_per_sec\":%.6f,"
                                  "\"pointer_chase_bw_MB_s\":%.6f,\"combined_bw_MB_s\":%.6f,"
@@ -1235,6 +1236,8 @@ int main(int argc, char *argv[])
                                  (unsigned long long)pointer_chase_total_cycles,
                                  stream_measured_iterations,
                                  avg_chase_kernels_per_iter,
+                                 rd_percentage,
+                                 pause,
                                  observed_thread_count,
                                  observed_stream_worker_count,
                                  chase_loads_per_sec,
