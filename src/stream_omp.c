@@ -1013,16 +1013,15 @@ int main(int argc, char *argv[])
                 int b;
                 for (b = 0; b < baseline_calls; b++)
                 {
-                    uint64_t chase_begin_cycles = now_cycles();
+                    uint64_t baseline_kernel_cycles = 0;
                     uint64_t chase_value = pointer_chase_kernel(chase_array,
                                                                 (uint64_t)chase_array_elems,
                                                                 chase_iterations,
                                                                 chase_loads_per_iter,
-                                                                &pointer_chase_next_offset);
-                    uint64_t chase_end_cycles = now_cycles();
+                                                                &pointer_chase_next_offset,
+                                                                &baseline_kernel_cycles);
                     chase_sink ^= chase_value;
-                    if (chase_end_cycles >= chase_begin_cycles)
-                        pointer_chase_baseline_cycles += (chase_end_cycles - chase_begin_cycles);
+                    pointer_chase_baseline_cycles += baseline_kernel_cycles;
                     pointer_chase_baseline_loads += (unsigned long long)chase_iterations *
                                                     (unsigned long long)chase_loads_per_iter;
                 }
