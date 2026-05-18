@@ -404,6 +404,21 @@ static uint64_t pointer_chase_kernel(struct pointer_chase_line *walk_array,
             : "+r"(remaining), "+r"(next)
             : "r"(base)
             : "x3", "cc", "memory");
+        if (kernel_debug_calls < 4)
+        {
+            char dbg_data[256];
+            snprintf(dbg_data, sizeof(dbg_data),
+                     "{\"kernel_debug_call\":%llu,\"stage\":\"after_split_asm\","
+                     "\"remaining_after_split\":%llu,\"next_offset_mid\":%llu}",
+                     (unsigned long long)kernel_debug_calls,
+                     (unsigned long long)remaining,
+                     (unsigned long long)next);
+            // #region agent log H8 split stage completion
+            debug_emit_stdout("diagnose-hang", "H8_kernel_stage_progress",
+                              "stream_omp.c:pointer_chase_kernel",
+                              "Reached checkpoint after split asm loop", dbg_data);
+            // #endregion
+        }
         if (split_cycles_out != NULL)
             *split_cycles_out = now_cycles() - begin_cycles;
         if (split_loads_out != NULL)
@@ -422,6 +437,21 @@ static uint64_t pointer_chase_kernel(struct pointer_chase_line *walk_array,
             : "+r"(remaining), "+r"(next)
             : "r"(base)
             : "x3", "cc", "memory");
+        if (kernel_debug_calls < 4)
+        {
+            char dbg_data[256];
+            snprintf(dbg_data, sizeof(dbg_data),
+                     "{\"kernel_debug_call\":%llu,\"stage\":\"after_rest_asm\","
+                     "\"remaining_after_rest\":%llu,\"next_offset_out\":%llu}",
+                     (unsigned long long)kernel_debug_calls,
+                     (unsigned long long)remaining,
+                     (unsigned long long)next);
+            // #region agent log H8 rest stage completion
+            debug_emit_stdout("diagnose-hang", "H8_kernel_stage_progress",
+                              "stream_omp.c:pointer_chase_kernel",
+                              "Reached checkpoint after rest asm loop", dbg_data);
+            // #endregion
+        }
         if (rest_cycles_out != NULL)
             *rest_cycles_out = now_cycles() - begin_cycles;
         if (rest_loads_out != NULL)
