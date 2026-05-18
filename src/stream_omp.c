@@ -1189,6 +1189,7 @@ int main(int argc, char *argv[])
                     double chase_loads_per_sec = 0.0;
                     double pointer_chase_bw_mb_s = 0.0;
                     double combined_bw_mb_s = 0.0;
+                    double avg_stream_iter_cycles = 0.0;
                     unsigned long long a_partition_hash = 0ULL;
                     unsigned long long b_partition_hash = 0ULL;
                     unsigned long long chase_partition_hash = 0ULL;
@@ -1213,6 +1214,10 @@ int main(int argc, char *argv[])
                             1.0e6;
                     }
                     combined_bw_mb_s = measured_bw_mb_s + pointer_chase_bw_mb_s;
+                    if (stream_measured_iterations > 0ULL)
+                        avg_stream_iter_cycles =
+                            (double)pointer_chase_measure_window_cycles /
+                            (double)stream_measured_iterations;
                     a_partition_hash = (unsigned long long)((a_base_addr >> 12) & 0x3ffULL);
                     b_partition_hash = (unsigned long long)((b_base_addr >> 12) & 0x3ffULL);
                     chase_partition_hash = (unsigned long long)((chase_base_addr >> 12) & 0x3ffULL);
@@ -1226,11 +1231,13 @@ int main(int argc, char *argv[])
                                  "\"rd_ratio\":%d,\"pause\":%d,"
                                  "\"thread_count\":%d,\"stream_worker_count\":%d,"
                                  "\"chase_loads_per_sec\":%.6f,"
+                                 "\"avg_stream_iter_cycles\":%.6f,"
                                  "\"pointer_chase_bw_MB_s\":%.6f,\"combined_bw_MB_s\":%.6f,"
                                  "\"a_base_addr\":\"0x%" PRIxPTR "\",\"b_base_addr\":\"0x%" PRIxPTR "\","
                                  "\"chase_base_addr\":\"0x%" PRIxPTR "\","
                                  "\"a_partition_hash\":%llu,\"b_partition_hash\":%llu,"
-                                 "\"chase_partition_hash\":%llu}",
+                                 "\"chase_partition_hash\":%llu,"
+                                 "\"build_marker\":\"dbg_h14_v1\"}",
                                  overall_chase_duty_pct,
                                  (unsigned long long)pointer_chase_iter_window_cycles_total,
                                  (unsigned long long)pointer_chase_total_cycles,
@@ -1241,6 +1248,7 @@ int main(int argc, char *argv[])
                                  observed_thread_count,
                                  observed_stream_worker_count,
                                  chase_loads_per_sec,
+                                 avg_stream_iter_cycles,
                                  pointer_chase_bw_mb_s,
                                  combined_bw_mb_s,
                                  a_base_addr,
