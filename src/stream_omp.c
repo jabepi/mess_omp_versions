@@ -956,25 +956,7 @@ int main(int argc, char *argv[])
         if (effective_warmup_iters < 0)
             effective_warmup_iters = 0;
         measured_iters = run_iterations - effective_warmup_iters;
-        if (thread_id == 0)
-        {
-            char dbg_data[320];
-            snprintf(dbg_data, sizeof(dbg_data),
-                     "{\"run_iterations\":%d,\"requested_warmup\":%d,\"effective_warmup\":%d,"
-                     "\"measured_iters\":%d,\"thread_count\":%d,\"stream_worker_count\":%d,"
-                     "\"thread0_pointer_chase\":%d}",
-                     run_iterations,
-                     warmup_iterations,
-                     effective_warmup_iters,
-                     measured_iters,
-                     thread_count,
-                     stream_worker_count,
-                     thread0_pointer_chase);
-            // #region agent log H1/H4 window sizing and overlap config
-            debug_emit_stdout("post-fix", "H1_window_or_clip", "stream_omp.c:measurement_setup",
-                              "Computed measurement window and worker topology", dbg_data);
-            // #endregion
-        }
+        (void)thread_count;
 
 #ifdef _OPENMP
         #pragma omp barrier
@@ -1053,37 +1035,14 @@ int main(int argc, char *argv[])
 #endif
                 if (thread_id == 0)
                 {
-                    char dbg_data[384];
-                    unsigned long long iter_loads =
-                        pointer_chase_total_loads - iter_chase_loads_before;
                     uint64_t iter_cycles =
                         pointer_chase_total_cycles - iter_chase_cycles_before;
                     iter_window_cycles = now_cycles() - iter_window_begin_cycles;
                     pointer_chase_iter_window_cycles_total += iter_window_cycles;
-                    if (iter_window_cycles > 0ULL)
-                        chase_duty_pct = ((double)iter_cycles * 100.0) / (double)iter_window_cycles;
-                    snprintf(dbg_data, sizeof(dbg_data),
-                             "{\"iter\":%d,\"chase_kernel_calls\":%llu,\"iter_loads\":%llu,"
-                             "\"iter_cycles\":%llu,\"iter_window_cycles\":%llu,"
-                             "\"chase_duty_pct\":%.4f,\"expected_iter_loads\":%llu}",
-                             iter,
-                             (unsigned long long)chase_kernel_calls_this_iter,
-                             iter_loads,
-                             (unsigned long long)iter_cycles,
-                             (unsigned long long)iter_window_cycles,
-                             chase_duty_pct,
-                             (unsigned long long)chase_iterations *
-                             (unsigned long long)chase_loads_per_iter);
-                    // #region agent log H2 per-iteration chase work
-                    debug_emit_stdout("post-fix", "H2_chase_work_varies_by_bw",
-                                      "stream_omp.c:measurement_iter",
-                                      "Per-iteration pointer-chase work and cycles", dbg_data);
-                    // #endregion
-                    // #region agent log H4 overlap duty-cycle evidence
-                    debug_emit_stdout("post-fix", "H4_overlap_duty_cycle",
-                                      "stream_omp.c:measurement_iter",
-                                      "Pointer-chase duty cycle within measured iteration", dbg_data);
-                    // #endregion
+                    (void)iter_chase_loads_before;
+                    (void)iter_cycles;
+                    (void)chase_kernel_calls_this_iter;
+                    (void)chase_duty_pct;
                 }
             }
 
