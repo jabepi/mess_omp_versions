@@ -368,6 +368,9 @@ static uint64_t pointer_chase_kernel(struct pointer_chase_line *walk_array,
 #if defined(__aarch64__)
     {
         static uint64_t kernel_debug_calls = 0;
+        uint64_t remaining = 0;
+        uint64_t next = 0;
+        uint64_t base = 0;
         if (kernel_debug_calls < 4)
         {
             char dbg_data[320];
@@ -386,9 +389,6 @@ static uint64_t pointer_chase_kernel(struct pointer_chase_line *walk_array,
             // #endregion
         }
         uint64_t begin_cycles = now_cycles();
-        register uint64_t remaining asm("x0");
-        register uint64_t next asm("x2");
-        register uint64_t base asm("x1");
         remaining = split;
         next = next_offset;
         base = base_addr_u64;
