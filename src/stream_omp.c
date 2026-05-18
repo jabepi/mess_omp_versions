@@ -598,6 +598,8 @@ int main(int argc, char *argv[])
     uint64_t pointer_chase_measure_window_cycles = 0;
     uint64_t pointer_chase_iter_window_cycles_total = 0;
     uint64_t pointer_chase_next_offset = 0;
+    uint64_t pointer_chase_baseline_cycles = 0;
+    unsigned long long pointer_chase_baseline_loads = 0ULL;
     unsigned long long stream_measured_iterations = 0ULL;
     volatile int stream_iter_done = 0;
     int stream_iter_workers_remaining = 0;
@@ -1001,6 +1003,29 @@ int main(int argc, char *argv[])
             #pragma omp barrier
 #endif
             if (thread_id == 0)
+            {
+                int baseline_calls = 2;
+                int b;
+                for (b = 0; b < baseline_calls; b++)
+                {
+                    uint64_t chase_begin_cycles = now_cycles();
+                    uint64_t chase_value = pointer_chase_kernel(chase_array,
+                                                                (uint64_t)chase_array_elems,
+                                                                chase_iterations,
+                                                                chase_loads_per_iter,
+                                                                &pointer_chase_next_offset);
+                    uint64_t chase_end_cycles = now_cycles();
+                    chase_sink ^= chase_value;
+                    if (chase_end_cycles >= chase_begin_cycles)
+                        pointer_chase_baseline_cycles += (chase_end_cycles - chase_begin_cycles);
+                    pointer_chase_baseline_loads += (unsigned long long)chase_iterations *
+                                                    (unsigned long long)chase_loads_per_iter;
+                }
+            }
+#ifdef _OPENMP
+            #pragma omp barrier
+#endif
+            if (thread_id == 0)
                 pointer_chase_measure_window_cycles = now_cycles();
 
             for (iter = 0; iter < measured_iters; iter++)
@@ -1164,6 +1189,8 @@ int main(int argc, char *argv[])
                 {
                     double overall_chase_duty_pct = 0.0;
                     double avg_chase_kernels_per_iter = 0.0;
+                    double baseline_latency_ns = 0.0;
+                    double delta_latency_ns = 0.0;
                     if (pointer_chase_iter_window_cycles_total > 0ULL)
                         overall_chase_duty_pct =
                             ((double)pointer_chase_total_cycles * 100.0) /
@@ -1174,18 +1201,28 @@ int main(int argc, char *argv[])
                             ((double)pointer_chase_total_loads /
                              ((double)chase_iterations * (double)chase_loads_per_iter)) /
                             (double)stream_measured_iterations;
+                    if (pointer_chase_baseline_loads > 0ULL && arch_timer_hz > 0ULL)
+                        baseline_latency_ns =
+                            ((double)pointer_chase_baseline_cycles /
+                             (double)pointer_chase_baseline_loads) *
+                            (1.0e9 / (double)arch_timer_hz);
+                    if (latency_sim_ns >= baseline_latency_ns)
+                        delta_latency_ns = latency_sim_ns - baseline_latency_ns;
                     // #region agent log H5 aggregate duty-cycle evidence
                     {
                         char duty_data[320];
                         snprintf(duty_data, sizeof(duty_data),
                                  "{\"overall_chase_duty_pct\":%.4f,\"iter_window_cycles_total\":%llu,"
                                  "\"total_chase_cycles\":%llu,\"measured_iters\":%llu,"
-                                 "\"avg_chase_kernels_per_iter\":%.6f}",
+                                 "\"avg_chase_kernels_per_iter\":%.6f,"
+                                 "\"baseline_latency_ns\":%.6f,\"delta_latency_ns\":%.6f}",
                                  overall_chase_duty_pct,
                                  (unsigned long long)pointer_chase_iter_window_cycles_total,
                                  (unsigned long long)pointer_chase_total_cycles,
                                  stream_measured_iterations,
-                                 avg_chase_kernels_per_iter);
+                                 avg_chase_kernels_per_iter,
+                                 baseline_latency_ns,
+                                 delta_latency_ns);
                         debug_emit_stdout("post-fix", "H5_aggregate_chase_duty",
                                           "stream_omp.c:final_summary",
                                           "Aggregate chase duty cycle across measured window", duty_data);
