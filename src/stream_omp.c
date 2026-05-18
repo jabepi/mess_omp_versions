@@ -607,6 +607,7 @@ int main(int argc, char *argv[])
     uint64_t pointer_chase_next_offset = 0;
     uint64_t pointer_kernel_cycles_min = ULLONG_MAX;
     uint64_t pointer_kernel_cycles_max = 0;
+    long double pointer_kernel_cycles_sq_sum = 0.0L;
     unsigned long long stream_measured_iterations = 0ULL;
     unsigned long long stream_measured_bytes = 0ULL;
     unsigned long long stream_passes_total = 0ULL;
@@ -1051,6 +1052,7 @@ int main(int argc, char *argv[])
                     pointer_chase_total_cycles += kernel_cycles;
                     pointer_chase_total_loads += (unsigned long long)chase_iterations *
                                                  (unsigned long long)chase_loads_per_iter;
+                    pointer_kernel_cycles_sq_sum += ((long double)kernel_cycles * (long double)kernel_cycles);
                     if (kernel_cycles < pointer_kernel_cycles_min)
                         pointer_kernel_cycles_min = kernel_cycles;
                     if (kernel_cycles > pointer_kernel_cycles_max)
@@ -1189,6 +1191,8 @@ int main(int argc, char *argv[])
                     double pointer_total_kernel_calls = 0.0;
                     double pointer_kernel_min_ns = 0.0;
                     double pointer_kernel_max_ns = 0.0;
+                    double pointer_kernel_stddev_ns = 0.0;
+                    double pointer_kernel_cv_pct = 0.0;
                     unsigned long long a_partition_hash = 0ULL;
                     unsigned long long b_partition_hash = 0ULL;
                     unsigned long long chase_partition_hash = 0ULL;
@@ -1212,6 +1216,20 @@ int main(int argc, char *argv[])
                     if (arch_timer_hz > 0ULL && pointer_kernel_cycles_max > 0ULL)
                         pointer_kernel_max_ns =
                             (double)pointer_kernel_cycles_max * (1.0e9 / (double)arch_timer_hz);
+                    if (pointer_total_kernel_calls > 0.0 && arch_timer_hz > 0ULL)
+                    {
+                        long double mean_cycles =
+                            (long double)pointer_chase_total_cycles / (long double)pointer_total_kernel_calls;
+                        long double mean_sq_cycles =
+                            pointer_kernel_cycles_sq_sum / (long double)pointer_total_kernel_calls;
+                        long double variance_cycles = mean_sq_cycles - (mean_cycles * mean_cycles);
+                        if (variance_cycles < 0.0L)
+                            variance_cycles = 0.0L;
+                        pointer_kernel_stddev_ns =
+                            sqrt((double)variance_cycles) * (1.0e9 / (double)arch_timer_hz);
+                        if (latency_sim_ns > 0.0)
+                            pointer_kernel_cv_pct = (pointer_kernel_stddev_ns * 100.0) / latency_sim_ns;
+                    }
                     if (pointer_chase_measure_window_cycles > 0ULL && arch_timer_hz > 0ULL)
                     {
                         chase_loads_per_sec =
@@ -1248,6 +1266,7 @@ int main(int argc, char *argv[])
                                  "\"stream_chunk_elems\":%d,"
                                  "\"pointer_core_window_cycles\":%llu,\"pointer_tail_window_cycles\":%llu,"
                                  "\"pointer_kernel_min_ns\":%.6f,\"pointer_kernel_max_ns\":%.6f,"
+                                 "\"pointer_kernel_stddev_ns\":%.6f,\"pointer_kernel_cv_pct\":%.6f,"
                                  "\"avg_stream_iter_cycles\":%.6f,"
                                  "\"pointer_chase_bw_MB_s\":%.6f,\"combined_bw_MB_s\":%.6f,"
                                  "\"a_base_addr\":\"0x%" PRIxPTR "\",\"b_base_addr\":\"0x%" PRIxPTR "\","
@@ -1274,6 +1293,8 @@ int main(int argc, char *argv[])
                                                       (pointer_chase_measure_window_cycles - pointer_chase_core_window_cycles) : 0ULL),
                                  pointer_kernel_min_ns,
                                  pointer_kernel_max_ns,
+                                 pointer_kernel_stddev_ns,
+                                 pointer_kernel_cv_pct,
                                  avg_stream_iter_cycles,
                                  pointer_chase_bw_mb_s,
                                  combined_bw_mb_s,
