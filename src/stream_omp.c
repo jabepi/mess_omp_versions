@@ -591,6 +591,7 @@ int main(int argc, char *argv[])
     uint64_t pointer_chase_total_cycles = 0;
     unsigned long long pointer_chase_total_loads = 0ULL;
     uint64_t pointer_chase_measure_window_cycles = 0;
+    uint64_t pointer_chase_iter_window_cycles_total = 0;
     uint64_t pointer_chase_next_offset = 0;
     unsigned long long stream_measured_iterations = 0ULL;
     uint64_t arch_timer_hz = cycles_per_second();
@@ -1018,6 +1019,12 @@ int main(int argc, char *argv[])
                 uint64_t iter_chase_cycles_before = pointer_chase_total_cycles;
                 unsigned long long iter_chase_loads_before = pointer_chase_total_loads;
                 uint64_t chase_kernel_calls_this_iter = 0;
+                uint64_t iter_window_begin_cycles = 0;
+                uint64_t iter_window_cycles = 0;
+                double chase_duty_pct = 0.0;
+
+                if (thread_id == 0)
+                    iter_window_begin_cycles = now_cycles();
 
                 if (thread_id == 0)
                 {
@@ -1051,19 +1058,31 @@ int main(int argc, char *argv[])
                         pointer_chase_total_loads - iter_chase_loads_before;
                     uint64_t iter_cycles =
                         pointer_chase_total_cycles - iter_chase_cycles_before;
+                    iter_window_cycles = now_cycles() - iter_window_begin_cycles;
+                    pointer_chase_iter_window_cycles_total += iter_window_cycles;
+                    if (iter_window_cycles > 0ULL)
+                        chase_duty_pct = ((double)iter_cycles * 100.0) / (double)iter_window_cycles;
                     snprintf(dbg_data, sizeof(dbg_data),
                              "{\"iter\":%d,\"chase_kernel_calls\":%llu,\"iter_loads\":%llu,"
-                             "\"iter_cycles\":%llu,\"expected_iter_loads\":%llu}",
+                             "\"iter_cycles\":%llu,\"iter_window_cycles\":%llu,"
+                             "\"chase_duty_pct\":%.4f,\"expected_iter_loads\":%llu}",
                              iter,
                              (unsigned long long)chase_kernel_calls_this_iter,
                              iter_loads,
                              (unsigned long long)iter_cycles,
+                             (unsigned long long)iter_window_cycles,
+                             chase_duty_pct,
                              (unsigned long long)chase_iterations *
                              (unsigned long long)chase_loads_per_iter);
                     // #region agent log H2 per-iteration chase work
                     debug_emit_stdout("post-fix", "H2_chase_work_varies_by_bw",
                                       "stream_omp.c:measurement_iter",
                                       "Per-iteration pointer-chase work and cycles", dbg_data);
+                    // #endregion
+                    // #region agent log H4 overlap duty-cycle evidence
+                    debug_emit_stdout("post-fix", "H4_overlap_duty_cycle",
+                                      "stream_omp.c:measurement_iter",
+                                      "Pointer-chase duty cycle within measured iteration", dbg_data);
                     // #endregion
                 }
             }
@@ -1129,6 +1148,28 @@ int main(int argc, char *argv[])
                     measured_bw_mb_s = measured_bytes /
                                        ((double)pointer_chase_measure_window_cycles / (double)arch_timer_hz) /
                                        1.0e6;
+                }
+                {
+                    double overall_chase_duty_pct = 0.0;
+                    if (pointer_chase_iter_window_cycles_total > 0ULL)
+                        overall_chase_duty_pct =
+                            ((double)pointer_chase_total_cycles * 100.0) /
+                            (double)pointer_chase_iter_window_cycles_total;
+                    // #region agent log H5 aggregate duty-cycle evidence
+                    {
+                        char duty_data[256];
+                        snprintf(duty_data, sizeof(duty_data),
+                                 "{\"overall_chase_duty_pct\":%.4f,\"iter_window_cycles_total\":%llu,"
+                                 "\"total_chase_cycles\":%llu,\"measured_iters\":%llu}",
+                                 overall_chase_duty_pct,
+                                 (unsigned long long)pointer_chase_iter_window_cycles_total,
+                                 (unsigned long long)pointer_chase_total_cycles,
+                                 stream_measured_iterations);
+                        debug_emit_stdout("post-fix", "H5_aggregate_chase_duty",
+                                          "stream_omp.c:final_summary",
+                                          "Aggregate chase duty cycle across measured window", duty_data);
+                    }
+                    // #endregion
                 }
                 snprintf(ptr_dbg_msg, sizeof(ptr_dbg_msg),
                          "Pointer-chase: sink=%llu total_cycles=%llu total_loads=%llu avg_latency_cycles=%.6f avg_latency_ns=%.6f measured_bw_MB_s=%.6f warmup_iters=%d measured_iters=%llu timer_hz=%llu",
