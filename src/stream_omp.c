@@ -695,6 +695,8 @@ int main(int argc, char *argv[])
     uint64_t pointer_chase_split_loads_total = 0;
     uint64_t pointer_chase_rest_loads_total = 0;
     unsigned long long stream_measured_iterations = 0ULL;
+    volatile int stream_iter_done = 0;
+    int stream_iter_workers_remaining = 0;
     uint64_t arch_timer_hz = cycles_per_second();
 
     if (debug_enabled)
@@ -1109,57 +1111,72 @@ int main(int argc, char *argv[])
                 if (thread_id == 0)
                     iter_window_begin_cycles = now_cycles();
 
-                if (thread_id == 0)
+#ifdef _OPENMP
+                #pragma omp single
+#endif
                 {
-                    if (iter < 4)
-                    {
-                        char dbg_data[192];
-                        snprintf(dbg_data, sizeof(dbg_data),
-                                 "{\"iter\":%d,\"measured_iters\":%d,\"chase_iterations\":%d,"
-                                 "\"chase_loads_per_iter\":%d}",
-                                 iter, measured_iters, chase_iterations, chase_loads_per_iter);
-                        // #region agent log H7 measured-loop heartbeat
-                        debug_emit_stdout("diagnose-hang", "H7_loop_progress",
-                                          "stream_omp.c:measurement_iter",
-                                          "Thread0 entering measured iteration", dbg_data);
-                        // #endregion
-                    }
+                    stream_iter_workers_remaining = stream_worker_count;
+                    stream_iter_done = (stream_worker_count == 0) ? 1 : 0;
                 }
+#ifdef _OPENMP
+                #pragma omp barrier
+#endif
 
                 if (thread_id == 0)
                 {
-                    uint64_t chase_begin_cycles = now_cycles();
-                    uint64_t split_cycles = 0;
-                    uint64_t split_loads_local = 0;
-                    uint64_t rest_cycles = 0;
-                    uint64_t rest_loads_local = 0;
-                    uint64_t chase_value = pointer_chase_kernel(chase_array,
-                                                                (uint64_t)chase_array_elems,
-                                                                chase_iterations,
-                                                                chase_loads_per_iter,
-                                                                &pointer_chase_next_offset,
-                                                                4096ULL,
-                                                                &split_cycles,
-                                                                &split_loads_local,
-                                                                &rest_cycles,
-                                                                &rest_loads_local);
-                    uint64_t chase_end_cycles = now_cycles();
-                    chase_sink ^= chase_value;
-                    if (chase_end_cycles >= chase_begin_cycles)
-                        pointer_chase_total_cycles += (chase_end_cycles - chase_begin_cycles);
-                    pointer_chase_split_cycles_total += split_cycles;
-                    pointer_chase_split_loads_total += split_loads_local;
-                    pointer_chase_rest_cycles_total += rest_cycles;
-                    pointer_chase_rest_loads_total += rest_loads_local;
-                    pointer_chase_total_loads += (unsigned long long)chase_iterations *
-                                                 (unsigned long long)chase_loads_per_iter;
-                    chase_kernel_calls_this_iter = 1;
+                    while (1)
+                    {
+                        uint64_t chase_begin_cycles = now_cycles();
+                        uint64_t split_cycles = 0;
+                        uint64_t split_loads_local = 0;
+                        uint64_t rest_cycles = 0;
+                        uint64_t rest_loads_local = 0;
+                        uint64_t chase_value = pointer_chase_kernel(chase_array,
+                                                                    (uint64_t)chase_array_elems,
+                                                                    chase_iterations,
+                                                                    chase_loads_per_iter,
+                                                                    &pointer_chase_next_offset,
+                                                                    4096ULL,
+                                                                    &split_cycles,
+                                                                    &split_loads_local,
+                                                                    &rest_cycles,
+                                                                    &rest_loads_local);
+                        uint64_t chase_end_cycles = now_cycles();
+                        chase_sink ^= chase_value;
+                        if (chase_end_cycles >= chase_begin_cycles)
+                            pointer_chase_total_cycles += (chase_end_cycles - chase_begin_cycles);
+                        pointer_chase_split_cycles_total += split_cycles;
+                        pointer_chase_split_loads_total += split_loads_local;
+                        pointer_chase_rest_cycles_total += rest_cycles;
+                        pointer_chase_rest_loads_total += rest_loads_local;
+                        pointer_chase_total_loads += (unsigned long long)chase_iterations *
+                                                     (unsigned long long)chase_loads_per_iter;
+                        chase_kernel_calls_this_iter++;
+#ifdef _OPENMP
+                        #pragma omp flush(stream_iter_done)
+#endif
+                        if (stream_iter_done)
+                            break;
+                    }
                 }
                 else if (local_elements > 0)
                 {
                     if (debug_enabled && iter == 0 && thread_id < 2)
                         debug_log_json("Thread entering synchronized STREAM/pointer-chase measurement loop");
                     STREAM_copy_rw(a + local_start, b + local_start, &local_elements, &pause);
+#ifdef _OPENMP
+                    if (stream_worker_count > 0)
+                    {
+                        int remaining_after = 0;
+                        #pragma omp atomic capture
+                        remaining_after = --stream_iter_workers_remaining;
+                        if (remaining_after == 0)
+                        {
+                            stream_iter_done = 1;
+                            #pragma omp flush(stream_iter_done)
+                        }
+                    }
+#endif
                 }
 #ifdef _OPENMP
                 #pragma omp barrier
@@ -1170,10 +1187,24 @@ int main(int argc, char *argv[])
                         pointer_chase_total_cycles - iter_chase_cycles_before;
                     iter_window_cycles = now_cycles() - iter_window_begin_cycles;
                     pointer_chase_iter_window_cycles_total += iter_window_cycles;
-                    (void)iter_chase_loads_before;
-                    (void)iter_cycles;
-                    (void)chase_kernel_calls_this_iter;
-                    (void)chase_duty_pct;
+                    if (iter_window_cycles > 0ULL)
+                        chase_duty_pct = ((double)iter_cycles * 100.0) / (double)iter_window_cycles;
+                    if (iter < 2)
+                    {
+                        char dbg_data[256];
+                        snprintf(dbg_data, sizeof(dbg_data),
+                                 "{\"iter\":%d,\"iter_chase_kernel_calls\":%llu,\"iter_loads\":%llu,"
+                                 "\"iter_chase_duty_pct\":%.4f}",
+                                 iter,
+                                 (unsigned long long)chase_kernel_calls_this_iter,
+                                 (unsigned long long)(pointer_chase_total_loads - iter_chase_loads_before),
+                                 chase_duty_pct);
+                        // #region agent log H9 continuous-chase verification
+                        debug_emit_stdout("post-fix", "H9_continuous_chase_per_iter",
+                                          "stream_omp.c:measurement_iter",
+                                          "Continuous chase activity while STREAM iteration executes", dbg_data);
+                        // #endregion
+                    }
                 }
             }
 
