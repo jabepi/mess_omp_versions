@@ -603,8 +603,6 @@ int main(int argc, char *argv[])
     uint64_t pointer_chase_measure_window_cycles = 0;
     uint64_t pointer_chase_iter_window_cycles_total = 0;
     uint64_t pointer_chase_next_offset = 0;
-    uint64_t pointer_chase_baseline_cycles = 0;
-    unsigned long long pointer_chase_baseline_loads = 0ULL;
     unsigned long long stream_measured_iterations = 0ULL;
     int observed_thread_count = 1;
     int observed_stream_worker_count = 0;
@@ -1015,28 +1013,6 @@ int main(int argc, char *argv[])
             #pragma omp barrier
 #endif
             if (thread_id == 0)
-            {
-                int baseline_calls = 2;
-                int b;
-                for (b = 0; b < baseline_calls; b++)
-                {
-                    uint64_t baseline_kernel_cycles = 0;
-                    uint64_t chase_value = pointer_chase_kernel(chase_array,
-                                                                (uint64_t)chase_array_elems,
-                                                                chase_iterations,
-                                                                chase_loads_per_iter,
-                                                                &pointer_chase_next_offset,
-                                                                &baseline_kernel_cycles);
-                    chase_sink ^= chase_value;
-                    pointer_chase_baseline_cycles += baseline_kernel_cycles;
-                    pointer_chase_baseline_loads += (unsigned long long)chase_iterations *
-                                                    (unsigned long long)chase_loads_per_iter;
-                }
-            }
-#ifdef _OPENMP
-            #pragma omp barrier
-#endif
-            if (thread_id == 0)
                 pointer_chase_measure_window_cycles = now_cycles();
 
             for (iter = 0; iter < measured_iters; iter++)
@@ -1203,8 +1179,6 @@ int main(int argc, char *argv[])
                 {
                     double overall_chase_duty_pct = 0.0;
                     double avg_chase_kernels_per_iter = 0.0;
-                    double baseline_latency_ns = 0.0;
-                    double delta_latency_ns = 0.0;
                     double chase_loads_per_sec = 0.0;
                     if (pointer_chase_iter_window_cycles_total > 0ULL)
                         overall_chase_duty_pct =
@@ -1216,13 +1190,6 @@ int main(int argc, char *argv[])
                             ((double)pointer_chase_total_loads /
                              ((double)chase_iterations * (double)chase_loads_per_iter)) /
                             (double)stream_measured_iterations;
-                    if (pointer_chase_baseline_loads > 0ULL && arch_timer_hz > 0ULL)
-                        baseline_latency_ns =
-                            ((double)pointer_chase_baseline_cycles /
-                             (double)pointer_chase_baseline_loads) *
-                            (1.0e9 / (double)arch_timer_hz);
-                    if (latency_sim_ns >= baseline_latency_ns)
-                        delta_latency_ns = latency_sim_ns - baseline_latency_ns;
                     if (pointer_chase_measure_window_cycles > 0ULL && arch_timer_hz > 0ULL)
                         chase_loads_per_sec =
                             (double)pointer_chase_total_loads /
@@ -1234,7 +1201,6 @@ int main(int argc, char *argv[])
                                  "{\"overall_chase_duty_pct\":%.4f,\"iter_window_cycles_total\":%llu,"
                                  "\"total_chase_cycles\":%llu,\"measured_iters\":%llu,"
                                  "\"avg_chase_kernels_per_iter\":%.6f,"
-                                 "\"baseline_latency_ns\":%.6f,\"delta_latency_ns\":%.6f,"
                                  "\"thread_count\":%d,\"stream_worker_count\":%d,"
                                  "\"chase_loads_per_sec\":%.6f}",
                                  overall_chase_duty_pct,
@@ -1242,8 +1208,6 @@ int main(int argc, char *argv[])
                                  (unsigned long long)pointer_chase_total_cycles,
                                  stream_measured_iterations,
                                  avg_chase_kernels_per_iter,
-                                 baseline_latency_ns,
-                                 delta_latency_ns,
                                  observed_thread_count,
                                  observed_stream_worker_count,
                                  chase_loads_per_sec);
