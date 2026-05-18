@@ -377,7 +377,7 @@ static uint64_t pointer_chase_kernel(struct pointer_chase_line *walk_array,
                      (unsigned long long)kernel_debug_calls,
                      (unsigned long long)total_loads,
                      (unsigned long long)split,
-                     (unsigned long long)remaining,
+                     (unsigned long long)split,
                      (unsigned long long)next_offset);
             // #region agent log H6 split-asm counter integrity
             debug_emit_stdout("post-fix-hang", "H6_split_counter_corruption",
