@@ -26,12 +26,6 @@ static void debug_log_json(const char *message)
     fprintf(stdout, "{\"message\":\"%s\",\"timestamp\":%lld}\n", message, debug_now_ms());
     fflush(stdout);
 }
-static uint64_t now_ns(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ((uint64_t)ts.tv_sec * 1000000000ULL) + (uint64_t)ts.tv_nsec;
-}
 static uint64_t now_cycles(void)
 {
 #if defined(__aarch64__)
@@ -326,10 +320,9 @@ static uint64_t pointer_chase_kernel(struct pointer_chase_line *walk_array,
                                      int chase_loads_per_iter,
                                      uint64_t *next_offset_state)
 {
-    uint64_t iter;
-    uint64_t step;
     uint64_t next_offset = 0;
-    uint8_t *base_addr;
+    uint64_t total_loads = 0;
+    uint64_t base_addr_u64;
     uint64_t max_offset;
 
     if (walk_array == NULL || elems == 0 || chase_iterations <= 0 || chase_loads_per_iter <= 0 ||
@@ -340,15 +333,38 @@ static uint64_t pointer_chase_kernel(struct pointer_chase_line *walk_array,
     if (*next_offset_state < max_offset && ((*next_offset_state % POINTER_CHASE_CACHE_LINE) == 0))
         next_offset = *next_offset_state;
 
-    base_addr = (uint8_t *)walk_array;
-    for (iter = 0; iter < (uint64_t)chase_iterations; iter++)
+    total_loads = (uint64_t)chase_iterations * (uint64_t)chase_loads_per_iter;
+    base_addr_u64 = (uint64_t)(uintptr_t)walk_array;
+#if defined(__aarch64__)
     {
-        for (step = 0; step < (uint64_t)chase_loads_per_iter; step++)
+        register uint64_t remaining asm("x0") = total_loads;
+        register uint64_t next asm("x2") = next_offset;
+        register uint64_t base asm("x1") = base_addr_u64;
+        asm volatile(
+            "cmp %0, #0\n\t"
+            "beq 2f\n\t"
+            "1:\n\t"
+            "add x3, %2, %1\n\t"
+            "ldr %1, [x3]\n\t"
+            "subs %0, %0, #1\n\t"
+            "bne 1b\n\t"
+            "2:\n\t"
+            : "+r"(remaining), "+r"(next)
+            : "r"(base)
+            : "x3", "cc", "memory");
+        next_offset = next;
+    }
+#else
+    {
+        uint64_t step;
+        uint8_t *base_addr = (uint8_t *)walk_array;
+        for (step = 0; step < total_loads; step++)
         {
             volatile uint64_t *entry = (volatile uint64_t *)(base_addr + next_offset);
             next_offset = *entry;
         }
     }
+#endif
 
     *next_offset_state = next_offset;
     return next_offset;
