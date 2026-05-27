@@ -34,8 +34,8 @@ double * __restrict a, * __restrict b;
 
 
 const char *usage = "[-r <read_ratio>] [-p <pause>] [-s <array_size>] [-n <iterations>] "
-                    "[-P <period_ticks>] [-c <chase_elems>] [-x <chase_iters>] "
-                    "[-l <chase_loads_per_iter>] [-w <walk_file>] [-t <0|1>] [-u <warmup_iters>] [-i] [-m] [-d] [-h]\n";
+                    "[-P <period_ticks>] [-c <chase_elems>] [-x <chase_total_loads>] "
+                    "[-w <walk_file>] [-t <0|1>] [-u <warmup_iters>] [-i] [-m] [-d] [-h]\n";
 
 void (*STREAM_copy_rw)(double *a_array, double *b_array,
                          ssize_t *array_size, const int* const pause) = NULL;
@@ -50,8 +50,7 @@ typedef struct {
     int       m5_enabled;
     int       debug_enabled;
     long long chase_array_elems;
-    int       chase_iterations;
-    int       chase_loads_per_iter;
+    uint64_t  chase_total_loads;
     const char *walk_file_path;
     int       thread0_pointer_chase;
     int       warmup_iterations;
@@ -60,7 +59,7 @@ typedef struct {
 static void parse_args(int argc, char *argv[], cli_options *opts)
 {
     int opt;
-    while ((opt = getopt(argc, argv, ":r:p:s:n:P:c:x:l:w:t:u:imdh")) != -1)
+    while ((opt = getopt(argc, argv, ":r:p:s:n:P:c:x:w:t:u:imdh")) != -1)
     {
         switch (opt)
         {
@@ -113,18 +112,10 @@ static void parse_args(int argc, char *argv[], cli_options *opts)
                 }
                 break;
             case 'x':
-                opts->chase_iterations = atoi(optarg);
-                if (opts->chase_iterations <= 0)
+                opts->chase_total_loads = (uint64_t)strtoull(optarg, NULL, 10);
+                if (opts->chase_total_loads == 0ULL)
                 {
-                    printf("ERROR: pointer-chase iterations must be > 0.\n");
-                    exit(-1);
-                }
-                break;
-            case 'l':
-                opts->chase_loads_per_iter = atoi(optarg);
-                if (opts->chase_loads_per_iter <= 0)
-                {
-                    printf("ERROR: pointer-chase loads per iter must be > 0.\n");
+                    printf("ERROR: pointer-chase total loads must be > 0.\n");
                     exit(-1);
                 }
                 break;
@@ -170,8 +161,7 @@ static void parse_args(int argc, char *argv[], cli_options *opts)
                 printf("  -n <iterations>         Set number of kernel iterations (positive integer)\n");
                 printf("  -P <period_ticks>       Set periodic statistics ticks interval (>= 0) waited to dump stats \n");
                 printf("  -c <chase_elems>        Set pointer-chase nodes (cache-line nodes, > 0)\n");
-                printf("  -x <chase_iters>        Set pointer-chase inner iterations (> 0)\n");
-                printf("  -l <loads_per_iter>     Set pointer-chase loads per inner iteration (> 0)\n");
+                printf("  -x <chase_total_loads>  Set pointer-chase total dependent loads per kernel call (> 0)\n");
                 printf("  -w <walk_file>          Pointer-walk file path to load/save\n");
                 printf("  -t <0|1>                Enable thread 0 pointer-chase role (1 enabled)\n");
                 printf("  -u <warmup_iters>       STREAM-only warmup iterations before pointer-chase measurement\n");
@@ -207,8 +197,7 @@ int main(int argc, char *argv[])
         .m5_enabled             = 0,
         .debug_enabled          = 0,
         .chase_array_elems      = 0,
-        .chase_iterations       = 5000,
-        .chase_loads_per_iter   = 64,
+        .chase_total_loads      = 320000ULL,
         .walk_file_path         = "array.dat",
         .thread0_pointer_chase  = 0,
         .warmup_iterations      = 4,
@@ -231,10 +220,10 @@ int main(int argc, char *argv[])
         {
             char dbg_msg[512];
             snprintf(dbg_msg, sizeof(dbg_msg),
-                "Command line arguments: rd_percentage=%d, pause=%d, array_size=%lld, iterations=%d, periodic_stats_ticks=%lld, skip_init=%d, m5_enabled=%d, debug_enabled=%d, chase_nodes=%lld, chase_iterations=%d, chase_loads_per_iter=%d, walk_file=%s, activate_ptchase=%d, warmup_iterations=%d",
+                "Command line arguments: rd_percentage=%d, pause=%d, array_size=%lld, iterations=%d, periodic_stats_ticks=%lld, skip_init=%d, m5_enabled=%d, debug_enabled=%d, chase_nodes=%lld, chase_total_loads=%llu, walk_file=%s, activate_ptchase=%d, warmup_iterations=%d",
                 opts.rd_percentage, opts.pause_value, opts.stream_array_size, opts.run_iterations,
                 opts.periodic_stats_ticks, opts.cli_skip_init, opts.m5_enabled, opts.debug_enabled,
-                opts.chase_array_elems, opts.chase_iterations, opts.chase_loads_per_iter, opts.walk_file_path, opts.thread0_pointer_chase, opts.warmup_iterations);
+                opts.chase_array_elems, (unsigned long long)opts.chase_total_loads, opts.walk_file_path, opts.thread0_pointer_chase, opts.warmup_iterations);
             debug_log_json(dbg_msg);
         }
 
@@ -441,8 +430,7 @@ int main(int argc, char *argv[])
                                   opts.chase_array_elems,
                                   chase_array_bytes,
                                   opts.thread0_pointer_chase,
-                                  opts.chase_iterations,
-                                  opts.chase_loads_per_iter,
+                                  opts.chase_total_loads,
                                   opts.walk_file_path,
                                   opts.run_iterations);
     }
@@ -632,14 +620,12 @@ int main(int argc, char *argv[])
                     uint64_t kernel_cycles = 0;
                     uint64_t chase_value = pointer_chase_kernel(chase_array,
                                                                 (uint64_t)opts.chase_array_elems,
-                                                                opts.chase_iterations,
-                                                                opts.chase_loads_per_iter,
+                                                                opts.chase_total_loads,
                                                                 &pointer_chase_next_offset,
                                                                 &kernel_cycles);
                     chase_sink ^= chase_value; //TO PREVENT COMPILER OPTIMIZATION
                     pointer_chase_total_cycles += kernel_cycles;
-                    pointer_chase_total_loads += (unsigned long long)opts.chase_iterations *
-                                                 (unsigned long long)opts.chase_loads_per_iter;
+                    pointer_chase_total_loads += (unsigned long long)opts.chase_total_loads;
                 }
                 stream_workers_stop = 1;
 #ifdef _OPENMP
