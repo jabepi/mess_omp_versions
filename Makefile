@@ -22,10 +22,13 @@ $(BUILDDIR)/nop.o: $(SRCDIR)/nop.c
 $(BUILDDIR)/utils.o: $(SRCDIR)/utils.c
 	$(CC) $(CFLAGS) -Wno-unused-but-set-variable -O0 -c $< -o $@
 
+$(BUILDDIR)/aux.o: $(SRCDIR)/aux.c
+	$(CC) $(CFLAGS) -Wno-unused-but-set-variable -O0 -c $< -o $@
+
 $(BUILDDIR)/stream_omp_c.o: $(SRCDIR)/stream_omp.c
 	$(CC) $(CFLAGS)  -O0 -c $< -o $@
 
-$(TARGET): $(BUILDDIR)/nop.o $(BUILDDIR)/utils.o $(BUILDDIR)/stream_omp_c.o
+$(TARGET): $(BUILDDIR)/nop.o $(BUILDDIR)/utils.o $(BUILDDIR)/aux.o $(BUILDDIR)/stream_omp_c.o
 	$(CC) $(CFLAGS)  -O0 $(LDFLAGS) $^ -o $@
 
 clean:

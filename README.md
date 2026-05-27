@@ -45,20 +45,17 @@ For the OpenMP pointer-chase path, use:
 
 - `-t 1` to enable thread 0 as a dedicated pointer-chase thread (`-t 0` keeps all threads on STREAM copy)
 - `-c <chase_elems>` to control pointer-chase nodes (cache-line nodes)
-- `-x <chase_iters>` and `-l <loads_per_iter>` to control pointer-chase work per kernel call
+- `-x <chase_total_loads>` to control total pointer-chase dependent loads per kernel call
 - `-w <walk_file>` to load/save the deterministic pointer walk (default `array.dat`)
 - `-u <warmup_iters>` to run STREAM-only warmup iterations before pointer-chase latency is measured (default `4`)
 
 When `-t 1` is used, thread 0 runs pointer-chasing while the remaining threads run the STREAM kernel.
-After warmup, the code prints one machine-readable line with:
+After warmup, the code prints:
 
-`<measured_bandwidth_MB_s> <avg_pointer_chase_latency_ns>`
+`Pointer-chase latency: total_ns=<...> avg_ns_per_access=<...>`
 
-measured over the same concurrent window.
-The measured region is synchronized per iteration: STREAM workers execute one STREAM chunk while thread 0 keeps pointer-chasing until those workers finish that chunk.
-This keeps latency sampling overlapped with the full STREAM measured phase.
-For stable pairs, use enough total iterations (for example `-n 20 -u 6`).
-If `-u` is too large relative to `-n`, warmup is clipped to keep at least one measured iteration.
+The measured region is overlapped: STREAM workers run continuously while thread 0 performs pointer-chase work.
+For stable measurements, use enough total iterations (for example `-n 20 -u 6`).
 When using the OpenMP GEM5 port, keep `OMP_NUM_THREADS` aligned with the simulated CPU count and prefer `OMP_PROC_BIND=close` plus `OMP_PLACES=cores` for deterministic placement.
 
 The example above displays the following output:

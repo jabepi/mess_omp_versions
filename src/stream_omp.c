@@ -12,103 +12,10 @@
 # include <stdint.h>
 # include <errno.h>
 # include <time.h>
-# include <inttypes.h>
 # include <omp.h>
 # include "utils.h"
+# include "aux.h"
 
-static long long debug_now_ms(void)
-{
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return ((long long)tv.tv_sec * 1000LL) + ((long long)tv.tv_usec / 1000LL);
-}
-static uint64_t debug_now_ms_u64(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return ((uint64_t)ts.tv_sec * 1000ULL) + (uint64_t)(ts.tv_nsec / 1000000ULL);
-}
-static void debug_emit_stdout(const char *run_id,
-                              const char *hypothesis_id,
-                              const char *location,
-                              const char *message,
-                              const char *data_json)
-{
-    fprintf(stdout,
-            "{\"sessionId\":\"71e020\",\"runId\":\"%s\",\"hypothesisId\":\"%s\","
-            "\"location\":\"%s\",\"message\":\"%s\",\"data\":%s,\"timestamp\":%llu}\n",
-            run_id,
-            hypothesis_id,
-            location,
-            message,
-            data_json ? data_json : "{}",
-            (unsigned long long)debug_now_ms_u64());
-    fflush(stdout);
-}
-static void debug_log_json(const char *message)
-{
-    fprintf(stdout, "{\"message\":\"%s\",\"timestamp\":%lld}\n", message, debug_now_ms());
-    fflush(stdout);
-}
-static uint64_t now_cycles(void)
-{
-#if defined(__aarch64__)
-    uint64_t cyc = 0;
-    __asm__ __volatile__(
-        "isb\n\t"
-        "mrs %0, cntvct_el0\n\t"
-        : "=r"(cyc));
-    return cyc;
-#else
-    return 0;
-#endif
-}
-static uint64_t cycles_per_second(void)
-{
-#if defined(__aarch64__)
-    uint64_t freq = 0;
-    __asm__ __volatile__(
-        "mrs %0, cntfrq_el0\n\t"
-        : "=r"(freq));
-    return freq;
-#else
-    return 0;
-#endif
-}
-
-// Gem5 functions 
-void m5_dump_reset_stats(uint64_t delay, uint64_t period) {
-#if defined(__aarch64__)
-    register uint64_t x0 __asm__("x0") = delay;
-    register uint64_t x1 __asm__("x1") = period;
-    __asm__ __volatile__ (
-        ".inst 0xFF420110\n\t"
-        : "+r" (x0), "+r" (x1)
-    );
-#endif
-}
-void m5_exit(uint64_t delay) {
-#if defined(__aarch64__)
-    register uint64_t x0 __asm__("x0") = delay;
-    __asm__ __volatile__ (
-        ".inst 0xFF210110\n\t"
-        : "+r" (x0)
-    );
-#endif
-}
-void m5_dump_stats(uint64_t delay, uint64_t period) {
-#if defined(__aarch64__)
-    register uint64_t x0 __asm__("x0") = delay;
-    register uint64_t x1 __asm__("x1") = period;
-    __asm__ __volatile__ (
-        ".inst 0xFF410110\n\t"
-        : "+r" (x0), "+r" (x1)
-    );
-#endif
-}
-
-
-# define HLINE "-------------------------------------------------------------\n"
 
 # ifndef MIN
     # define MIN(x,y) ((x)<(y)?(x):(y))
@@ -122,288 +29,9 @@ void m5_dump_stats(uint64_t delay, uint64_t period) {
 #endif
 
 #define STREAM_KERNEL_GRAIN_ELEMS 400
-#define STREAM_STOP_CHUNK_ELEMS (STREAM_KERNEL_GRAIN_ELEMS * 128)
-#define POINTER_CHASE_CACHE_LINE 128
-#define POINTER_CHASE_DEFAULT_BYTES (100ULL * 1024ULL * 1024ULL)
 
 double * __restrict a, * __restrict b;
-ssize_t array_elements, array_bytes, array_alignment;
 
-struct pointer_chase_line
-{
-    uint64_t next_offset;
-    uint8_t pad[POINTER_CHASE_CACHE_LINE - sizeof(uint64_t)];
-};
-
-static void shuffle_u64(uint64_t *array, uint64_t n)
-{
-    uint64_t i;
-
-    srand(0);
-    if (n <= 1)
-        return;
-
-    for (i = 0; i < n - 1; i++)
-    {
-        uint64_t j = i + (uint64_t)(rand() / (RAND_MAX / (n - i) + 1));
-        uint64_t t = array[j];
-        array[j] = array[i];
-        array[i] = t;
-    }
-}
-
-static void generate_pointer_walk(struct pointer_chase_line *walk_array, uint64_t elems)
-{
-    uint64_t *perm;
-    uint64_t j;
-
-    if (elems == 0)
-        return;
-
-    if (elems == 1)
-    {
-        walk_array[0].next_offset = 0;
-        return;
-    }
-
-    perm = (uint64_t *)malloc(elems * sizeof(uint64_t));
-
-    if (perm == NULL)
-    {
-        fprintf(stderr, "WARNING: pointer-chase permutation allocation failed; using sequential ring.\n");
-        for (j = 0; j < elems; j++)
-            walk_array[j].next_offset = ((j + 1) % elems) * POINTER_CHASE_CACHE_LINE;
-        free(perm);
-        return;
-    }
-
-    for (j = 0; j < elems; j++)
-        perm[j] = j;
-
-    shuffle_u64(perm, elems);
-
-    for (j = 0; j < elems; j++)
-    {
-        uint64_t cur = perm[j];
-        uint64_t next = perm[(j + 1) % elems];
-        walk_array[cur].next_offset = next * POINTER_CHASE_CACHE_LINE;
-    }
-
-    free(perm);
-}
-
-static int validate_pointer_walk(const struct pointer_chase_line *walk_array, uint64_t elems)
-{
-    uint8_t *in_degree = NULL;
-    uint8_t *visited = NULL;
-    uint64_t i;
-    uint64_t node = 0;
-    int ok = 0;
-
-    if (walk_array == NULL || elems == 0)
-        return 0;
-
-    in_degree = (uint8_t *)calloc(elems, sizeof(uint8_t));
-    visited = (uint8_t *)calloc(elems, sizeof(uint8_t));
-    if (in_degree == NULL || visited == NULL)
-        goto cleanup;
-
-    for (i = 0; i < elems; i++)
-    {
-        uint64_t next_offset = walk_array[i].next_offset;
-        uint64_t next_idx;
-        if ((next_offset % POINTER_CHASE_CACHE_LINE) != 0)
-            goto cleanup;
-        next_idx = next_offset / POINTER_CHASE_CACHE_LINE;
-        if (next_idx >= elems)
-            goto cleanup;
-        in_degree[next_idx]++;
-        if (in_degree[next_idx] > 1)
-            goto cleanup;
-    }
-
-    for (i = 0; i < elems; i++)
-    {
-        if (visited[node] != 0)
-            goto cleanup;
-        visited[node] = 1;
-        node = walk_array[node].next_offset / POINTER_CHASE_CACHE_LINE;
-    }
-
-    if (node != 0)
-        goto cleanup;
-    for (i = 0; i < elems; i++)
-    {
-        if (visited[i] == 0)
-            goto cleanup;
-    }
-
-    ok = 1;
-
-cleanup:
-    free(in_degree);
-    free(visited);
-    return ok;
-}
-
-static int load_pointer_walk_file(const char *walk_file_path,
-                                  struct pointer_chase_line *walk_array,
-                                  uint64_t elems)
-{
-    FILE *input_file;
-    uint64_t i;
-    unsigned long long tmp;
-    uint64_t max_offset;
-
-    if (walk_file_path == NULL || walk_file_path[0] == '\0')
-        return -1;
-
-    input_file = fopen(walk_file_path, "r");
-    if (input_file == NULL)
-        return -1;
-
-    max_offset = elems * POINTER_CHASE_CACHE_LINE;
-    for (i = 0; i < elems; i++)
-    {
-        if (fscanf(input_file, "%llu", &tmp) != 1)
-        {
-            fclose(input_file);
-            return -1;
-        }
-        if ((tmp % POINTER_CHASE_CACHE_LINE) != 0 || tmp >= max_offset)
-        {
-            fclose(input_file);
-            return -1;
-        }
-        walk_array[i].next_offset = (uint64_t)tmp;
-    }
-
-    fclose(input_file);
-    if (!validate_pointer_walk(walk_array, elems))
-        return -1;
-    return 0;
-}
-
-static int save_pointer_walk_file(const char *walk_file_path,
-                                  const struct pointer_chase_line *walk_array,
-                                  uint64_t elems)
-{
-    FILE *output_file;
-    uint64_t i;
-
-    if (walk_file_path == NULL || walk_file_path[0] == '\0')
-        return -1;
-
-    output_file = fopen(walk_file_path, "w");
-    if (output_file == NULL)
-        return -1;
-
-    for (i = 0; i < elems; i++)
-    {
-        if (fprintf(output_file, "%llu\n",
-                    (unsigned long long)walk_array[i].next_offset) < 0)
-        {
-            fclose(output_file);
-            return -1;
-        }
-    }
-
-    if (fclose(output_file) != 0)
-        return -1;
-
-    return 0;
-}
-
-static void init_pointer_walk(const char *walk_file_path,
-                              struct pointer_chase_line *walk_array,
-                              uint64_t elems)
-{
-    if (load_pointer_walk_file(walk_file_path, walk_array, elems) == 0)
-    {
-        printf("Pointer walk loaded from '%s'.\n", walk_file_path);
-        return;
-    }
-
-    printf("Pointer walk file '%s' unavailable or invalid; generating deterministic walk in-memory.\n",
-           walk_file_path ? walk_file_path : "(null)");
-    generate_pointer_walk(walk_array, elems);
-    if (save_pointer_walk_file(walk_file_path, walk_array, elems) == 0)
-    {
-        printf("Pointer walk saved to '%s' for future executions.\n", walk_file_path);
-    }
-    else
-    {
-        printf("WARNING: failed to save pointer walk to '%s' (%s).\n",
-               walk_file_path ? walk_file_path : "(null)",
-               strerror(errno));
-    }
-}
-
-static uint64_t pointer_chase_kernel(struct pointer_chase_line *walk_array,
-                                     uint64_t elems,
-                                     int chase_iterations,
-                                     int chase_loads_per_iter,
-                                     uint64_t *next_offset_state,
-                                     uint64_t *kernel_cycles_out)
-{
-    uint64_t next_offset = 0;
-    uint64_t total_loads = 0;
-    uint64_t base_addr_u64;
-    uint64_t max_offset;
-
-    if (walk_array == NULL || elems == 0 || chase_iterations <= 0 || chase_loads_per_iter <= 0 ||
-        next_offset_state == NULL)
-        return 0;
-
-    max_offset = elems * POINTER_CHASE_CACHE_LINE;
-    if (*next_offset_state < max_offset && ((*next_offset_state % POINTER_CHASE_CACHE_LINE) == 0))
-        next_offset = *next_offset_state;
-
-    total_loads = (uint64_t)chase_iterations * (uint64_t)chase_loads_per_iter;
-    base_addr_u64 = (uint64_t)(uintptr_t)walk_array;
-#if defined(__aarch64__)
-    {
-        uint64_t remaining = 0;
-        uint64_t next = 0;
-        uint64_t base = 0;
-        uint64_t begin_cycles = now_cycles();
-        remaining = total_loads;
-        next = next_offset;
-        base = base_addr_u64;
-        asm volatile(
-            "cmp %0, #0\n\t"
-            "beq 2f\n\t"
-            "1:\n\t"
-            "add x3, %2, %1\n\t"
-            "ldr %1, [x3]\n\t"
-            "subs %0, %0, #1\n\t"
-            "bne 1b\n\t"
-            "2:\n\t"
-            : "+r"(remaining), "+r"(next)
-            : "r"(base)
-            : "x3", "cc", "memory");
-        next_offset = next;
-        if (kernel_cycles_out != NULL)
-            *kernel_cycles_out += (now_cycles() - begin_cycles);
-    }
-#else
-    {
-        uint64_t step;
-        uint8_t *base_addr = (uint8_t *)walk_array;
-        uint64_t begin_cycles = now_cycles();
-        for (step = 0; step < total_loads; step++)
-        {
-            volatile uint64_t *entry = (volatile uint64_t *)(base_addr + next_offset);
-            next_offset = *entry;
-        }
-        if (kernel_cycles_out != NULL)
-            *kernel_cycles_out += (now_cycles() - begin_cycles);
-    }
-#endif
-
-    *next_offset_state = next_offset;
-    return next_offset;
-}
 
 const char *usage = "[-r <read_ratio>] [-p <pause>] [-s <array_size>] [-n <iterations>] "
                     "[-P <period_ticks>] [-c <chase_elems>] [-x <chase_iters>] "
@@ -557,12 +185,16 @@ static void parse_args(int argc, char *argv[], cli_options *opts)
                 exit(-1);
         }
     }
+
+    // Post-parse defaults/cross-option checks (not duplicated in per-case validation).
+    if (opts->chase_array_elems == 0)
+        opts->chase_array_elems = (long long)(POINTER_CHASE_DEFAULT_BYTES / POINTER_CHASE_CACHE_LINE);
 }
 
 int main(int argc, char *argv[])
 {
     
-    int BytesPerWord, k;
+    int k;
     ssize_t j;
 
     cli_options opts = {
@@ -583,64 +215,31 @@ int main(int argc, char *argv[])
     };
     parse_args(argc, argv, &opts);
 
-    long long STREAM_ARRAY_SIZE     = opts.stream_array_size;
-    int       rd_percentage         = opts.rd_percentage;
-    int       pause                 = opts.pause_value;
-    int       run_iterations        = opts.run_iterations;
-    long long periodic_stats_ticks  = opts.periodic_stats_ticks;
-    int       cli_skip_init         = opts.cli_skip_init;
-    int       m5_enabled            = opts.m5_enabled;
-    int       debug_enabled         = opts.debug_enabled;
-    long long chase_array_elems     = opts.chase_array_elems;
+
+    // Auxiliary variables
     ssize_t chase_array_bytes       = 0;
-    int chase_iterations            = opts.chase_iterations;
-    int chase_loads_per_iter        = opts.chase_loads_per_iter;
-    const char *walk_file_path      = opts.walk_file_path;
-    int thread0_pointer_chase       = opts.thread0_pointer_chase;
-    int warmup_iterations           = opts.warmup_iterations;
     struct pointer_chase_line *chase_array = NULL;
     volatile uint64_t chase_sink = 0;
     uint64_t pointer_chase_total_cycles = 0;
     unsigned long long pointer_chase_total_loads = 0ULL;
-    uint64_t pointer_chase_measure_window_cycles = 0;
-    uint64_t pointer_chase_core_window_cycles = 0;
     uint64_t pointer_chase_next_offset = 0;
-    uint64_t pointer_kernel_cycles_min = ULLONG_MAX;
-    uint64_t pointer_kernel_cycles_max = 0;
-    long double pointer_kernel_cycles_sq_sum = 0.0L;
-    unsigned long long stream_measured_iterations = 0ULL;
-    unsigned long long stream_measured_bytes = 0ULL;
-    unsigned long long stream_passes_total = 0ULL;
-    int observed_thread_count = 1;
-    int observed_stream_worker_count = 0;
-    uintptr_t a_base_addr = 0;
-    uintptr_t b_base_addr = 0;
-    uintptr_t chase_base_addr = 0;
     volatile int stream_workers_stop = 0;
+    volatile int start_pointer_chase = 0;
     uint64_t arch_timer_hz = cycles_per_second();
 
-    if (debug_enabled)
+    if (opts.debug_enabled)
         {
             char dbg_msg[512];
             snprintf(dbg_msg, sizeof(dbg_msg),
-                "Command line arguments: rd_percentage=%d, pause=%d, array_size=%lld, iterations=%d, periodic_stats_ticks=%lld, skip_init=%d, m5_enabled=%d, debug_enabled=%d, chase_nodes=%lld, chase_iterations=%d, chase_loads_per_iter=%d, walk_file=%s, thread0_pointer_chase=%d, warmup_iterations=%d",
-                rd_percentage, pause, STREAM_ARRAY_SIZE, run_iterations,
-                periodic_stats_ticks, cli_skip_init, m5_enabled, debug_enabled,
-                chase_array_elems, chase_iterations, chase_loads_per_iter, walk_file_path, thread0_pointer_chase, warmup_iterations);
+                "Command line arguments: rd_percentage=%d, pause=%d, array_size=%lld, iterations=%d, periodic_stats_ticks=%lld, skip_init=%d, m5_enabled=%d, debug_enabled=%d, chase_nodes=%lld, chase_iterations=%d, chase_loads_per_iter=%d, walk_file=%s, activate_ptchase=%d, warmup_iterations=%d",
+                opts.rd_percentage, opts.pause_value, opts.stream_array_size, opts.run_iterations,
+                opts.periodic_stats_ticks, opts.cli_skip_init, opts.m5_enabled, opts.debug_enabled,
+                opts.chase_array_elems, opts.chase_iterations, opts.chase_loads_per_iter, opts.walk_file_path, opts.thread0_pointer_chase, opts.warmup_iterations);
             debug_log_json(dbg_msg);
         }
 
-    if (thread0_pointer_chase && warmup_iterations >= run_iterations)
-    {
-        printf("ERROR: with -t 1, warmup iterations (-u=%d) must be smaller than total iterations (-n=%d).\n",
-               warmup_iterations, run_iterations);
-        printf("Please choose values such that measured iterations are explicit and stable (example: -n 30 -u 10).\n");
-        exit(-1);
-    }
-   
-    
     // Assigning the right asm function based on the RD ratio
-    switch(rd_percentage)
+    switch(opts.rd_percentage)
     {
         case 0:
             STREAM_copy_rw = &STREAM_copy_0;
@@ -800,170 +399,133 @@ int main(int argc, char *argv[])
             break;
     }
 
-    /* --- distribute requested storage across OpenMP threads --- */
+    // ------------------------------------------------------------
+    // ALLOCATE ARRAYS
+    // ------------------------------------------------------------
     
-    // Round up the array size to the nearest multiple of the kernel grain size
-    array_elements = STREAM_ARRAY_SIZE;             
-    if (array_elements % STREAM_KERNEL_GRAIN_ELEMS != 0)
-        array_elements += STREAM_KERNEL_GRAIN_ELEMS -
-                          (array_elements % STREAM_KERNEL_GRAIN_ELEMS);
-    array_alignment = STREAM_ARRAY_ALIGNMENT; 
-
-    // Dynamically allocate the three arrays using "posix_memalign()"
-    array_bytes = array_elements * sizeof(STREAM_TYPE);
-    k = posix_memalign((void **)&a, array_alignment, array_bytes);
+    // 1. Allocate STREAM arrays
+    if (opts.stream_array_size % STREAM_KERNEL_GRAIN_ELEMS != 0)
+        opts.stream_array_size += STREAM_KERNEL_GRAIN_ELEMS -
+                                  (opts.stream_array_size % STREAM_KERNEL_GRAIN_ELEMS);
+    ssize_t array_bytes = (ssize_t)opts.stream_array_size * (ssize_t)sizeof(STREAM_TYPE);
+    k = posix_memalign((void **)&a, STREAM_ARRAY_ALIGNMENT, array_bytes);
     if (k != 0)
     {
         printf("Allocation of array a failed, return code is %d\n",k);
         exit(1);
     }
-    k = posix_memalign((void **)&b, array_alignment, array_bytes);
+    k = posix_memalign((void **)&b, STREAM_ARRAY_ALIGNMENT, array_bytes);
     if (k != 0)
     {
         printf("Allocation of array b failed, return code is %d\n",k);
         exit(1);
     }
-    if (chase_array_elems == 0)
-        chase_array_elems = (long long)(POINTER_CHASE_DEFAULT_BYTES / POINTER_CHASE_CACHE_LINE);
-    chase_array_bytes = (ssize_t)chase_array_elems * (ssize_t)sizeof(struct pointer_chase_line);
+
+    // 2. Allocate and initialize pointer-chase array
+    chase_array_bytes = (ssize_t)opts.chase_array_elems * (ssize_t)sizeof(struct pointer_chase_line);
     k = posix_memalign((void **)&chase_array, POINTER_CHASE_CACHE_LINE, (size_t)chase_array_bytes);
     if (k != 0)
     {
         printf("Allocation of pointer-chase array failed, return code is %d\n",k);
         exit(1);
     }
-    init_pointer_walk(walk_file_path, chase_array, (uint64_t)chase_array_elems);
-    a_base_addr = (uintptr_t)a;
-    b_base_addr = (uintptr_t)b;
-    chase_base_addr = (uintptr_t)chase_array;
+    init_pointer_walk(opts.walk_file_path, chase_array, (uint64_t)opts.chase_array_elems);
 
-    // Initial informational printouts -- rank 0 handles all the output
-    if (debug_enabled)
+    // ------------------------------------------------------------
+    //  DEBUG PRINTOUTS
+    // ------------------------------------------------------------
+    if (opts.debug_enabled)
     {
-        printf(HLINE);
-        printf("$ Memory bandwidth load kernel $\n");
-        printf(HLINE);
-        BytesPerWord = sizeof(STREAM_TYPE);
-        printf("This system uses %d bytes per array element.\n",
-        BytesPerWord);
-
-        printf("Total Aggregate Array size = %llu (elements)\n" , (unsigned long long) STREAM_ARRAY_SIZE);
-        printf("Total Aggregate Memory per array = %.1f MiB (= %.1f GiB).\n",
-          BytesPerWord * ( (double) STREAM_ARRAY_SIZE / 1024.0/1024.0),
-          BytesPerWord * ( (double) STREAM_ARRAY_SIZE / 1024.0/1024.0/1024.0));
-        printf("Total Aggregate memory required = %.1f MiB (= %.1f GiB).\n",
-          (2.0 * BytesPerWord) * ( (double) STREAM_ARRAY_SIZE / 1024.0/1024.),
-          (2.0 * BytesPerWord) * ( (double) STREAM_ARRAY_SIZE / 1024.0/1024./1024.));
-        printf("Pointer-chase array elements = %lld (cache-line nodes)\n", chase_array_elems);
-        printf("Pointer-chase array memory = %.1f MiB (= %.1f GiB).\n",
-          ((double)chase_array_bytes) / 1024.0 / 1024.0,
-          ((double)chase_array_bytes) / 1024.0 / 1024.0 / 1024.0);
-        printf("Pointer-chase config: thread0=%s chase_iters=%d chase_loads_per_iter=%d walk_file='%s'\n",
-               thread0_pointer_chase ? "enabled" : "disabled",
-               chase_iterations, chase_loads_per_iter, walk_file_path);
-
-        printf(HLINE);
-        printf("The kernel will be executed %d times.\n", run_iterations);
-
-        #ifdef _OPENMP
-            printf(HLINE);
-            #pragma omp parallel
-            {
-                #pragma omp master
-                {
-                    k = omp_get_num_threads();
-                    printf ("Number of Threads requested = %i\n",k);
-                }
-            }
-        #endif
-
-        #ifdef _OPENMP
-            k = 0;
-            #pragma omp parallel
-            #pragma omp atomic
-                k++;
-                printf ("Number of Threads counted = %i\n",k);
-        #endif
-
+        print_initial_kernel_info((int)sizeof(STREAM_TYPE),
+                                  opts.stream_array_size,
+                                  opts.chase_array_elems,
+                                  chase_array_bytes,
+                                  opts.thread0_pointer_chase,
+                                  opts.chase_iterations,
+                                  opts.chase_loads_per_iter,
+                                  opts.walk_file_path,
+                                  opts.run_iterations);
     }
 
-    /* --- SETUP --- initialize arrays --- */
+    // ------------------------------------------------------------
+    //  INITIALIZE STREAM ARRAYS
+    // ------------------------------------------------------------
     
-    if (!cli_skip_init)
+    if (!opts.cli_skip_init)
     {
-        if (debug_enabled)
+        if (opts.debug_enabled)
             debug_log_json("Starting array initialization setup");
-        for (j=0; j<array_elements; j++)
+        for (j = 0; j < (ssize_t)opts.stream_array_size; j++)
         {
             a[j] = 1.0;
             b[j] = 2.0;
         }
-        if (debug_enabled)
+        if (opts.debug_enabled)
             debug_log_json("Finished array initialization setup");
     }
     
-    /*	--- MAIN LOOP --- repeat the kernel like STREAM --- */
-    if (debug_enabled)
-        debug_log_json("Entering ROI parallel section");
+    // ------------------------------------------------------------
+    //  MAIN LOOP
+    // ------------------------------------------------------------
+    if (opts.debug_enabled)
+        debug_log_json("Entering main kernel section");
     
 
 #ifdef _OPENMP
         #pragma omp parallel
 #endif
-    {
+    {   
+        // 1. Split the stream arrays among the threads 
+        // (each thread will process a contiguous chunk of the stream array)
+        // ------------------------------------------------------------
         int thread_id = 0;
         int thread_count = 1;
-        int stream_worker_count = 0;
-        int stream_worker_idx = -1;
+        int stream_worker_count = 0;  // number of threads that will run the STREAM kernel
+        int stream_worker_idx = -1;   // index of the current thread in the stream worker pool
         int iter;
-        int effective_warmup_iters = warmup_iterations;
-        int measured_iters = run_iterations;
-        // total_blocks: total number of STREAM_KERNEL_GRAIN_ELEMS-sized blocks
-        // that make up the whole working set (array_elements is rounded up to
-        // a multiple of the grain, so this division is exact).
-        ssize_t total_blocks = array_elements / STREAM_KERNEL_GRAIN_ELEMS;
-        // chunk: base number of blocks each thread gets when total_blocks is
-        // divided as evenly as possible across thread_count threads.
+        int warmup_iters = opts.warmup_iterations;
+        
+        // total_blocks: number of subdivions of the stream array
+        ssize_t total_blocks = (ssize_t)opts.stream_array_size / STREAM_KERNEL_GRAIN_ELEMS;
+        
+        // chunk: number of blocks each thread will process
         ssize_t chunk = total_blocks;
-        // remainder: blocks left over after the even split; the first
-        // `remainder` threads each receive one extra block.
+        
+        // remainder: number of blocks left over after the even split
         ssize_t remainder = 0;
+        
         // local_blocks: number of blocks this particular thread will process
-        // (chunk, plus one extra if this thread is among the first `remainder`).
         ssize_t local_blocks = total_blocks;
-        // local_start: starting element index (offset into a/b) for this
-        // thread's slice; always a multiple of STREAM_KERNEL_GRAIN_ELEMS so
-        // each thread starts on a kernel-block boundary.
+        
+        // local_start: starting element index (offset into a/b) for this thread's slice
         ssize_t local_start = 0;
-        // local_elements: length, in elements, of this thread's slice
-        // (= local_blocks * STREAM_KERNEL_GRAIN_ELEMS); passed to the kernel.
-        ssize_t local_elements = array_elements;
+        
+        // local_elements: number of elements this thread will process
+        ssize_t local_elements = (ssize_t)opts.stream_array_size;
 
 #ifdef _OPENMP
         thread_id = omp_get_thread_num();
         thread_count = omp_get_num_threads();
 #endif
 
-        stream_worker_count = thread0_pointer_chase ?
+        // Number of threads that will run the STREAM kernel
+        // 1. If the pointer-chase is enabled, the number of threads is the total number of threads minus 1
+        // 2. If the pointer-chase is disabled, the number of threads is the total number of threads
+        stream_worker_count = opts.thread0_pointer_chase ?
                               (thread_count > 1 ? thread_count - 1 : 0) :
                               thread_count;
-        if (thread_id == 0)
-        {
-            observed_thread_count = thread_count;
-            observed_stream_worker_count = stream_worker_count;
-        }
 
+        
+        // Note: stream worker count can be 0 if the pointer-chase is enabled and there is only one thread
         if (stream_worker_count > 0)
         {
-            if (!thread0_pointer_chase)
+            if (!opts.thread0_pointer_chase)
                 stream_worker_idx = thread_id;
             else if (thread_id > 0)
                 stream_worker_idx = thread_id - 1;
         }
 
-        // Per-thread partitioning of the total_blocks across thread_count
-        // OpenMP workers that run STREAM copy, distributing any remainder
-        // one block at a time to the lowest-numbered worker indices.
+        // Divide the stream array among the threads
         if (stream_worker_count > 0 && stream_worker_idx >= 0)
         {
             chunk = total_blocks / stream_worker_count;
@@ -979,174 +541,152 @@ int main(int argc, char *argv[])
             local_start = 0;
             local_elements = 0;
         }
-        if (debug_enabled && thread_id < 4)
-            debug_log_json("Computed thread partition for STREAM kernel");
 
-        if (effective_warmup_iters >= run_iterations)
-            effective_warmup_iters = (run_iterations > 0) ? (run_iterations - 1) : 0;
-        if (effective_warmup_iters < 0)
-            effective_warmup_iters = 0;
-        measured_iters = run_iterations - effective_warmup_iters;
-        (void)thread_count;
+        if (opts.debug_enabled && thread_id < 4)
+            debug_log_json("Computed thread partition for STREAM kernel");
+        // ------------------------------------------------------------
 
 #ifdef _OPENMP
         #pragma omp barrier
         #pragma omp master
 #endif
         {
-            if (m5_enabled)
+
+        // 2. Reset gem5 statistics if enabled
+            if (opts.m5_enabled)
             {
-                if (debug_enabled)
+                if (opts.debug_enabled)
                     debug_log_json("Resetting gem5 statistics before timed region");
                 m5_dump_reset_stats(0, 0);
 
-                if (debug_enabled)
+                if (opts.debug_enabled)
                     debug_log_json("Enabling periodic gem5 statistics dumps");
-                m5_dump_stats(0, (uint64_t)periodic_stats_ticks);
+                m5_dump_stats(0, (uint64_t)opts.periodic_stats_ticks);
             }
         }
 #ifdef _OPENMP
         #pragma omp barrier
 #endif
 
-        if (thread0_pointer_chase)
-        {
-            /* Phase 1: STREAM warmup to establish bandwidth before probing. */
-            for (iter = 0; iter < effective_warmup_iters; iter++)
-            {
-                if (thread_id > 0 && local_elements > 0)
-                    STREAM_copy_rw(a + local_start, b + local_start, &local_elements, &pause);
-#ifdef _OPENMP
-                #pragma omp barrier
-#endif
-            }
-            stream_measured_iterations = (unsigned long long)measured_iters;
 
-#ifdef _OPENMP
-            #pragma omp barrier
-#endif
+        // ------------------------------------------------------------
+        //  IF POINTER-CHASE IS ENABLED
+        // ------------------------------------------------------------
+        if (opts.thread0_pointer_chase)
+        {
             if (thread_id == 0)
             {
                 stream_workers_stop = 0;
-                pointer_chase_measure_window_cycles = now_cycles();
-            }
+                if (stream_worker_count == 0)
+                    start_pointer_chase = 1;
 #ifdef _OPENMP
-            #pragma omp barrier
+                #pragma omp flush(stream_workers_stop, start_pointer_chase)
 #endif
+            }
 
-            /* Phase 2: while STREAM workers run continuously, thread 0 performs
-             * a fixed amount of pointer-chase work. When it finishes, workers stop.
-             */
+            // ------------------------------------------------------------
+            //  IF THIS IS A STREAM WORKER
+            // ------------------------------------------------------------
+            if (thread_id > 0 && local_elements > 0)
+            {
+                // 1. STREAM workers run warmup first.
+                for (iter = 0; iter < warmup_iters; iter++)
+                    STREAM_copy_rw(a + local_start, b + local_start, &local_elements, &opts.pause_value);
+
+                // Notify thread 0 that overlap can start.
+                if (stream_worker_idx == 0)
+                {
+                    start_pointer_chase = 1;
+#ifdef _OPENMP
+                    #pragma omp flush(start_pointer_chase)
+#endif
+                }
+
+                // After warmup, keep running STREAM until thread 0 signals stop.
+                while (1)
+                {
+#ifdef _OPENMP
+                        #pragma omp flush(stream_workers_stop)
+#endif
+                        if (stream_workers_stop)
+                            break;
+                        STREAM_copy_rw(a + local_start, b + local_start, &local_elements, &opts.pause_value);
+                }
+                
+            }
+            
+            // ------------------------------------------------------------
+            //  IF THIS IS THE POINTER-CHASE THREAD
+            // ------------------------------------------------------------
             if (thread_id == 0)
             {
-                for (iter = 0; iter < measured_iters; iter++)
+#ifdef _OPENMP
+                while (!start_pointer_chase)
+                {
+                    #pragma omp flush(start_pointer_chase)
+                }
+#endif
+                // Run the pointer-chase kernel 
+                for (iter = 0; iter < opts.run_iterations; iter++)
                 {
                     uint64_t kernel_cycles = 0;
                     uint64_t chase_value = pointer_chase_kernel(chase_array,
-                                                                (uint64_t)chase_array_elems,
-                                                                chase_iterations,
-                                                                chase_loads_per_iter,
+                                                                (uint64_t)opts.chase_array_elems,
+                                                                opts.chase_iterations,
+                                                                opts.chase_loads_per_iter,
                                                                 &pointer_chase_next_offset,
                                                                 &kernel_cycles);
-                    chase_sink ^= chase_value;
+                    chase_sink ^= chase_value; //TO PREVENT COMPILER OPTIMIZATION
                     pointer_chase_total_cycles += kernel_cycles;
-                    pointer_chase_total_loads += (unsigned long long)chase_iterations *
-                                                 (unsigned long long)chase_loads_per_iter;
-                    pointer_kernel_cycles_sq_sum += ((long double)kernel_cycles * (long double)kernel_cycles);
-                    if (kernel_cycles < pointer_kernel_cycles_min)
-                        pointer_kernel_cycles_min = kernel_cycles;
-                    if (kernel_cycles > pointer_kernel_cycles_max)
-                        pointer_kernel_cycles_max = kernel_cycles;
-                    if (iter < 2)
-                    {
-                        char dbg_data[256];
-                        snprintf(dbg_data, sizeof(dbg_data),
-                                 "{\"iter\":%d,\"pointer_iter_kernel_calls\":1,\"pointer_iter_loads\":%llu}",
-                                 iter,
-                                 (unsigned long long)chase_iterations *
-                                 (unsigned long long)chase_loads_per_iter);
-                        // #region agent log H9 continuous-chase verification
-                        debug_emit_stdout("post-fix", "H9_continuous_chase_per_iter",
-                                          "stream_omp.c:measurement_iter",
-                                          "Fixed pointer-chase iteration while STREAM runs", dbg_data);
-                        // #endregion
-                    }
+                    pointer_chase_total_loads += (unsigned long long)opts.chase_iterations *
+                                                 (unsigned long long)opts.chase_loads_per_iter;
                 }
-                pointer_chase_core_window_cycles = now_cycles() - pointer_chase_measure_window_cycles;
                 stream_workers_stop = 1;
 #ifdef _OPENMP
                 #pragma omp flush(stream_workers_stop)
 #endif
+                // Calculate the latency of the pointer-chase kernel
+                double latency_sim_ns = 0.0;
+                double latency_cycles = 0.0;
+                double total_latency_ns = 0.0;
+                if (pointer_chase_total_loads > 0ULL && pointer_chase_total_cycles > 0ULL)
+                    latency_cycles = (double)pointer_chase_total_cycles /
+                                        (double)pointer_chase_total_loads;
+                if (pointer_chase_total_cycles > 0ULL && arch_timer_hz > 0ULL)
+                    total_latency_ns = (double)pointer_chase_total_cycles * (1.0e9 / (double)arch_timer_hz);
+                if (latency_cycles > 0.0 && arch_timer_hz > 0ULL)
+                    latency_sim_ns = latency_cycles * (1.0e9 / (double)arch_timer_hz);
+                printf("Pointer-chase latency: total_ns=%.6f avg_ns_per_access=%.6f\n",
+                        total_latency_ns, latency_sim_ns);
+                
             }
-            else if (local_elements > 0)
-            {
-                ssize_t stream_offset = 0;
-                while (1)
-                {
-                    ssize_t chunk_elems = local_elements - stream_offset;
-                    unsigned long long bytes_this_pass = 0ULL;
-                    if (chunk_elems > (ssize_t)STREAM_STOP_CHUNK_ELEMS)
-                        chunk_elems = (ssize_t)STREAM_STOP_CHUNK_ELEMS;
-                    if (chunk_elems <= 0)
-                    {
-                        stream_offset = 0;
-                        chunk_elems = local_elements;
-                        if (chunk_elems > (ssize_t)STREAM_STOP_CHUNK_ELEMS)
-                            chunk_elems = (ssize_t)STREAM_STOP_CHUNK_ELEMS;
-                    }
-                    bytes_this_pass = (unsigned long long)chunk_elems *
-                                      (unsigned long long)sizeof(STREAM_TYPE) * 2ULL;
-#ifdef _OPENMP
-                    #pragma omp flush(stream_workers_stop)
-#endif
-                    if (stream_workers_stop)
-                        break;
-                    STREAM_copy_rw(a + local_start + stream_offset,
-                                   b + local_start + stream_offset,
-                                   &chunk_elems, &pause);
-                    stream_offset += chunk_elems;
-                    if (stream_offset >= local_elements)
-                        stream_offset = 0;
-#ifdef _OPENMP
-                    #pragma omp atomic
-#endif
-                    stream_measured_bytes += bytes_this_pass;
-#ifdef _OPENMP
-                    #pragma omp atomic
-#endif
-                    stream_passes_total++;
-                }
-            }
-
-#ifdef _OPENMP
-            #pragma omp barrier
-#endif
-            if (thread_id == 0)
-                pointer_chase_measure_window_cycles = now_cycles() - pointer_chase_measure_window_cycles;
         }
         else
         {
-            for (iter = 0; iter < run_iterations; iter++)
+        // ------------------------------------------------------------
+        //  IF THE POINTER-CHASE IS DISABLED
+        // ------------------------------------------------------------
+            for (iter = 0; iter < opts.run_iterations; iter++)
             {
                 if (thread_id == 0)
                 {
-                    if (debug_enabled)
+                    if (opts.debug_enabled)
                         debug_log_json("Starting STREAM kernel iteration");
                 }
                 if (local_elements > 0)
                 {
                     if (iter == 0 && thread_id == 0)
                     {
-                        if (debug_enabled)
+                        if (opts.debug_enabled)
                             debug_log_json("Calling STREAM kernel function for the first time");
                     }
-                    STREAM_copy_rw(a + local_start, b + local_start, &local_elements, &pause);
-                    if (debug_enabled && iter == 0 && thread_id < 2)
+                    STREAM_copy_rw(a + local_start, b + local_start, &local_elements, &opts.pause_value);
+                    if (opts.debug_enabled && iter == 0 && thread_id < 2)
                         debug_log_json("Finished first STREAM kernel call sample");
                 }
                 if (thread_id == 0)
                 {
-                    if (debug_enabled)
+                    if (opts.debug_enabled)
                         debug_log_json("Finished STREAM kernel iteration");
                 }
             }
@@ -1154,205 +694,20 @@ int main(int argc, char *argv[])
 
 #ifdef _OPENMP
         #pragma omp barrier
-        if (debug_enabled && thread_id < 4)
+        if (opts.debug_enabled && thread_id < 4)
             debug_log_json("Thread reached final ROI barrier");
         #pragma omp master
 #endif
         {
-            if (thread0_pointer_chase)
+            if (opts.m5_enabled)
             {
-                char ptr_dbg_msg[256];
-                double latency_sim_ns = 0.0;
-                double latency_cycles = 0.0;
-                double measured_bw_mb_s = 0.0;
-                if (pointer_chase_total_loads > 0ULL && pointer_chase_total_cycles > 0ULL)
-                    latency_cycles = (double)pointer_chase_total_cycles /
-                                     (double)pointer_chase_total_loads;
-                if (latency_cycles > 0.0 && arch_timer_hz > 0ULL)
-                    latency_sim_ns = latency_cycles * (1.0e9 / (double)arch_timer_hz);
-                if (stream_worker_count > 0 &&
-                    pointer_chase_measure_window_cycles > 0ULL &&
-                    arch_timer_hz > 0ULL &&
-                    stream_measured_bytes > 0ULL)
-                {
-                    double measured_bytes = (double)stream_measured_bytes;
-                    measured_bw_mb_s = measured_bytes /
-                                       ((double)pointer_chase_measure_window_cycles / (double)arch_timer_hz) /
-                                       1.0e6;
-                }
-                {
-                    double overall_chase_duty_pct = 0.0;
-                    double avg_chase_kernels_per_iter = 0.0;
-                    double chase_loads_per_sec = 0.0;
-                    double pointer_chase_bw_mb_s = 0.0;
-                    double combined_bw_mb_s = 0.0;
-                    double avg_stream_iter_cycles = 0.0;
-                    double stream_bytes_per_pass = 0.0;
-                    double pointer_total_kernel_calls = 0.0;
-                    double pointer_kernel_min_ns = 0.0;
-                    double pointer_kernel_max_ns = 0.0;
-                    double pointer_kernel_stddev_ns = 0.0;
-                    double pointer_kernel_cv_pct = 0.0;
-                    unsigned long long a_partition_hash = 0ULL;
-                    unsigned long long b_partition_hash = 0ULL;
-                    unsigned long long chase_partition_hash = 0ULL;
-                    if (pointer_chase_measure_window_cycles > 0ULL)
-                        overall_chase_duty_pct =
-                            ((double)pointer_chase_total_cycles * 100.0) /
-                            (double)pointer_chase_measure_window_cycles;
-                    if (stream_measured_iterations > 0ULL &&
-                        chase_iterations > 0 && chase_loads_per_iter > 0)
-                        avg_chase_kernels_per_iter =
-                            ((double)pointer_chase_total_loads /
-                             ((double)chase_iterations * (double)chase_loads_per_iter)) /
-                            (double)stream_measured_iterations;
-                    if (chase_iterations > 0 && chase_loads_per_iter > 0)
-                        pointer_total_kernel_calls =
-                            (double)pointer_chase_total_loads /
-                            ((double)chase_iterations * (double)chase_loads_per_iter);
-                    if (arch_timer_hz > 0ULL && pointer_kernel_cycles_min != ULLONG_MAX)
-                        pointer_kernel_min_ns =
-                            (double)pointer_kernel_cycles_min * (1.0e9 / (double)arch_timer_hz);
-                    if (arch_timer_hz > 0ULL && pointer_kernel_cycles_max > 0ULL)
-                        pointer_kernel_max_ns =
-                            (double)pointer_kernel_cycles_max * (1.0e9 / (double)arch_timer_hz);
-                    if (pointer_total_kernel_calls > 0.0 && arch_timer_hz > 0ULL)
-                    {
-                        long double mean_cycles =
-                            (long double)pointer_chase_total_cycles / (long double)pointer_total_kernel_calls;
-                        long double mean_sq_cycles =
-                            pointer_kernel_cycles_sq_sum / (long double)pointer_total_kernel_calls;
-                        long double variance_cycles = mean_sq_cycles - (mean_cycles * mean_cycles);
-                        if (variance_cycles < 0.0L)
-                            variance_cycles = 0.0L;
-                        pointer_kernel_stddev_ns =
-                            sqrt((double)variance_cycles) * (1.0e9 / (double)arch_timer_hz);
-                        if (latency_sim_ns > 0.0)
-                            pointer_kernel_cv_pct = (pointer_kernel_stddev_ns * 100.0) / latency_sim_ns;
-                    }
-                    if (pointer_chase_measure_window_cycles > 0ULL && arch_timer_hz > 0ULL)
-                    {
-                        chase_loads_per_sec =
-                            (double)pointer_chase_total_loads /
-                            ((double)pointer_chase_measure_window_cycles / (double)arch_timer_hz);
-                        pointer_chase_bw_mb_s =
-                            ((double)pointer_chase_total_loads * 8.0) /
-                            ((double)pointer_chase_measure_window_cycles / (double)arch_timer_hz) /
-                            1.0e6;
-                    }
-                    combined_bw_mb_s = measured_bw_mb_s + pointer_chase_bw_mb_s;
-                    if (stream_passes_total > 0ULL)
-                        stream_bytes_per_pass =
-                            (double)stream_measured_bytes / (double)stream_passes_total;
-                    if (stream_measured_iterations > 0ULL)
-                        avg_stream_iter_cycles =
-                            (double)pointer_chase_measure_window_cycles /
-                            (double)stream_measured_iterations;
-                    a_partition_hash = (unsigned long long)((a_base_addr >> 12) & 0x3ffULL);
-                    b_partition_hash = (unsigned long long)((b_base_addr >> 12) & 0x3ffULL);
-                    chase_partition_hash = (unsigned long long)((chase_base_addr >> 12) & 0x3ffULL);
-                    // #region agent log H5 aggregate duty-cycle evidence
-                    {
-                        char duty_data[1024];
-                        snprintf(duty_data, sizeof(duty_data),
-                                 "{\"overall_chase_duty_pct\":%.4f,\"iter_window_cycles_total\":%llu,"
-                                 "\"total_chase_cycles\":%llu,\"measured_iters\":%llu,"
-                                 "\"avg_chase_kernels_per_iter\":%.6f,"
-                                 "\"rd_ratio\":%d,\"pause\":%d,"
-                                 "\"thread_count\":%d,\"stream_worker_count\":%d,"
-                                 "\"chase_loads_per_sec\":%.6f,"
-                                 "\"stream_passes_total\":%llu,\"stream_bytes_per_pass\":%.6f,"
-                                 "\"pointer_total_kernel_calls\":%.6f,"
-                                 "\"stream_chunk_elems\":%d,"
-                                 "\"pointer_core_window_cycles\":%llu,\"pointer_tail_window_cycles\":%llu,"
-                                 "\"pointer_kernel_min_ns\":%.6f,\"pointer_kernel_max_ns\":%.6f,"
-                                 "\"pointer_kernel_stddev_ns\":%.6f,\"pointer_kernel_cv_pct\":%.6f,"
-                                 "\"avg_stream_iter_cycles\":%.6f,"
-                                 "\"pointer_chase_bw_MB_s\":%.6f,\"combined_bw_MB_s\":%.6f,"
-                                 "\"a_base_addr\":\"0x%" PRIxPTR "\",\"b_base_addr\":\"0x%" PRIxPTR "\","
-                                 "\"chase_base_addr\":\"0x%" PRIxPTR "\","
-                                 "\"a_partition_hash\":%llu,\"b_partition_hash\":%llu,"
-                                 "\"chase_partition_hash\":%llu,"
-                                 "\"build_marker\":\"dbg_h16_chunked_stream_stop\"}",
-                                 overall_chase_duty_pct,
-                                 (unsigned long long)pointer_chase_measure_window_cycles,
-                                 (unsigned long long)pointer_chase_total_cycles,
-                                 stream_measured_iterations,
-                                 avg_chase_kernels_per_iter,
-                                 rd_percentage,
-                                 pause,
-                                 observed_thread_count,
-                                 observed_stream_worker_count,
-                                 chase_loads_per_sec,
-                                 stream_passes_total,
-                                 stream_bytes_per_pass,
-                                 pointer_total_kernel_calls,
-                                 STREAM_STOP_CHUNK_ELEMS,
-                                 (unsigned long long)pointer_chase_core_window_cycles,
-                                 (unsigned long long)(pointer_chase_measure_window_cycles > pointer_chase_core_window_cycles ?
-                                                      (pointer_chase_measure_window_cycles - pointer_chase_core_window_cycles) : 0ULL),
-                                 pointer_kernel_min_ns,
-                                 pointer_kernel_max_ns,
-                                 pointer_kernel_stddev_ns,
-                                 pointer_kernel_cv_pct,
-                                 avg_stream_iter_cycles,
-                                 pointer_chase_bw_mb_s,
-                                 combined_bw_mb_s,
-                                 a_base_addr,
-                                 b_base_addr,
-                                 chase_base_addr,
-                                 a_partition_hash,
-                                 b_partition_hash,
-                                 chase_partition_hash);
-                        debug_emit_stdout("post-fix", "H5_aggregate_chase_duty",
-                                          "stream_omp.c:final_summary",
-                                          "Aggregate chase duty cycle across measured window", duty_data);
-                    }
-                    // #endregion
-                }
-                snprintf(ptr_dbg_msg, sizeof(ptr_dbg_msg),
-                         "Pointer-chase: sink=%llu total_cycles=%llu total_loads=%llu avg_latency_cycles=%.6f avg_latency_ns=%.6f measured_bw_MB_s=%.6f warmup_iters=%d measured_iters=%llu timer_hz=%llu",
-                         (unsigned long long)chase_sink,
-                         (unsigned long long)pointer_chase_total_cycles,
-                         pointer_chase_total_loads,
-                         latency_cycles,
-                         latency_sim_ns,
-                         measured_bw_mb_s,
-                         effective_warmup_iters,
-                         stream_measured_iterations,
-                         (unsigned long long)arch_timer_hz);
-                debug_log_json(ptr_dbg_msg);
-                {
-                    char dbg_data[384];
-                    snprintf(dbg_data, sizeof(dbg_data),
-                             "{\"total_cycles\":%llu,\"total_loads\":%llu,\"avg_latency_ns\":%.6f,"
-                             "\"avg_latency_cycles\":%.6f,\"measured_bw_MB_s\":%.6f,"
-                             "\"measured_iters\":%llu,\"timer_hz\":%llu}",
-                             (unsigned long long)pointer_chase_total_cycles,
-                             pointer_chase_total_loads,
-                             latency_sim_ns,
-                             latency_cycles,
-                             measured_bw_mb_s,
-                             stream_measured_iterations,
-                             (unsigned long long)arch_timer_hz);
-                    // #region agent log H3 summary correlation evidence
-                    debug_emit_stdout("post-fix", "H3_summary_bw_latency_correlation",
-                                      "stream_omp.c:final_summary",
-                                      "Final measured BW and latency summary", dbg_data);
-                    // #endregion
-                }
-                if (stream_worker_count > 0)
-                    printf("%.6f %.6f\n", measured_bw_mb_s, latency_sim_ns);
-            }
-            if (m5_enabled)
-            {
-                if (debug_enabled)
+                if (opts.debug_enabled)
                     debug_log_json("Leaving ROI and dumping final gem5 statistics");
                 m5_dump_stats(0, 0);
             }
         }
     }
-    if (m5_enabled)
+    if (opts.m5_enabled)
         m5_exit(0);
     
     free(a);
