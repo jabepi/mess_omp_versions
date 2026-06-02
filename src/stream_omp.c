@@ -410,15 +410,18 @@ int main(int argc, char *argv[])
         exit(1);
     }
 
-    // 2. Allocate and initialize pointer-chase array
-    chase_array_bytes = (ssize_t)opts.chase_array_elems * (ssize_t)sizeof(struct pointer_chase_line);
-    k = posix_memalign((void **)&chase_array, POINTER_CHASE_CACHE_LINE, (size_t)chase_array_bytes);
-    if (k != 0)
+    // 2. Allocate and initialize pointer-chase array only when enabled.
+    if (opts.thread0_pointer_chase)
     {
-        printf("Allocation of pointer-chase array failed, return code is %d\n",k);
-        exit(1);
+        chase_array_bytes = (ssize_t)opts.chase_array_elems * (ssize_t)sizeof(struct pointer_chase_line);
+        k = posix_memalign((void **)&chase_array, POINTER_CHASE_CACHE_LINE, (size_t)chase_array_bytes);
+        if (k != 0)
+        {
+            printf("Allocation of pointer-chase array failed, return code is %d\n",k);
+            exit(1);
+        }
+        init_pointer_walk(opts.walk_file_path, chase_array, (uint64_t)opts.chase_array_elems);
     }
-    init_pointer_walk(opts.walk_file_path, chase_array, (uint64_t)opts.chase_array_elems);
 
     // ------------------------------------------------------------
     //  DEBUG PRINTOUTS
